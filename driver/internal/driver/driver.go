@@ -44,6 +44,13 @@ const (
 	labelName      = "openshell.ai/sandbox-name"
 	labelWorkspace = "openshell.ai/sandbox-workspace"
 	labelNamespace = "openshell.ai/sandbox-namespace"
+	// labelOwner scopes a sandbox to one driver instance (one gateway), so
+	// several gateways can share a Blaxel workspace without adopting, or
+	// cleaning up, each other's sandboxes.
+	labelOwner = "openshell.ai/driver-owner"
+
+	// DefaultOwner owns sandboxes created before labelOwner existed.
+	DefaultOwner = "blaxel"
 
 	sandboxProc = "openshell-sandbox"
 	tunnelProc  = "os-tunnel"
@@ -59,6 +66,8 @@ const (
 )
 
 type Config struct {
+	// Owner identifies this driver instance; see labelOwner.
+	Owner        string
 	Region       string
 	DefaultImage string
 	MemoryMiB    int
@@ -302,7 +311,7 @@ func (d *Driver) StopSandbox(ctx context.Context, req *pb.StopSandboxRequest) (*
 		cancel()
 	}
 	if r.url != "" {
-		if err := d.bl.KillProcess(ctx, r.url, sandboxProc); err != nil && !errors.Is(err, blaxel.ErrNotFound) {
+		if err := d.bl.KillProcess(ctx, r.blxName, sandboxProc); err != nil && !errors.Is(err, blaxel.ErrNotFound) {
 			d.log.Warn("kill sandbox process", "sandbox", r.name, "err", err)
 		}
 	}
@@ -368,14 +377,13 @@ func (d *Driver) provision(ctx context.Context, r *record, sb *pb.DriverSandbox)
 	image := d.image(r, sb)
 	mem, _ := d.memoryMiB(sb)
 	labels := map[string]string{labelManaged: "openshell-driver-blaxel", labelID: sanitizeLabel(r.id),
-		labelName: sanitizeLabel(r.name), labelWorkspace: sanitizeLabel(r.workspace), labelNamespace: sanitizeLabel(r.namespace)}
+		labelName: sanitizeLabel(r.name), labelWorkspace: sanitizeLabel(r.workspace), labelNamespace: sanitizeLabel(r.namespace),
+		labelOwner: sanitizeLabel(d.cfg.Owner)}
 	d.event(r, "Normal", "Creating", fmt.Sprintf("image=%s memory=%dMiB region=%s extraArgs=%v", image, mem, d.cfg.Region, d.cfg.ExtraArgs))
-	created, err := d.bl.CreateSandbox(ctx, blaxel.Sandbox{
-		Metadata: blaxel.Metadata{Name: r.blxName, Labels: labels},
-		Spec: blaxel.Spec{Region: d.cfg.Region, Runtime: blaxel.Runtime{
-			Image: image, Memory: mem, Generation: "mk3", ExtraArgs: d.cfg.ExtraArgs,
-			Ports: []blaxel.Port{{Target: d.cfg.TunnelPort, Protocol: "HTTP"}},
-		}},
+	created, err := d.bl.CreateSandbox(ctx, blaxel.SandboxSpec{
+		Name: r.blxName, Labels: labels, Region: d.cfg.Region,
+		Image: image, MemoryMiB: mem, ExtraArgs: d.cfg.ExtraArgs,
+		Ports: []blaxel.Port{{Target: d.cfg.TunnelPort, Protocol: "HTTP"}},
 	})
 	if err != nil {
 		return fmt.Errorf("create Blaxel sandbox: %w", err)
@@ -400,8 +408,8 @@ func (d *Driver) waitDeployed(ctx context.Context, name string, sb *blaxel.Sandb
 		if sb != nil {
 			switch strings.ToUpper(sb.Status) {
 			case "DEPLOYED":
-				if sb.Metadata.URL != "" {
-					return sb.Metadata.URL, nil
+				if sb.URL != "" {
+					return sb.URL, nil
 				}
 			case "FAILED", "TERMINATED":
 				return "", fmt.Errorf("Blaxel sandbox %s is %s", name, sb.Status)
@@ -436,17 +444,17 @@ func (d *Driver) bootstrap(ctx context.Context, r *record, sb *pb.DriverSandbox,
 		if err != nil {
 			return err
 		}
-		if err := d.bl.WriteFile(ctx, r.url, f.dst, data, f.perm); err != nil {
+		if err := d.bl.WriteFile(ctx, r.blxName, f.dst, data, f.perm); err != nil {
 			return fmt.Errorf("upload %s: %w", f.dst, err)
 		}
 	}
 	spec := sb.GetSpec()
 	if tok := spec.GetSandboxToken(); tok != "" {
-		if err := d.bl.WriteFile(ctx, r.url, tokenPath, []byte(tok), "0600"); err != nil {
+		if err := d.bl.WriteFile(ctx, r.blxName, tokenPath, []byte(tok), "0600"); err != nil {
 			return fmt.Errorf("upload token: %w", err)
 		}
 	}
-	if err := d.bl.WriteFile(ctx, r.url, launchScript, []byte(d.launchScript(r, sb, image)), "0700"); err != nil {
+	if err := d.bl.WriteFile(ctx, r.blxName, launchScript, []byte(d.launchScript(r, sb, image)), "0700"); err != nil {
 		return fmt.Errorf("upload launch script: %w", err)
 	}
 
@@ -469,7 +477,7 @@ id sandbox >/dev/null 2>&1 || useradd -m -u 1500 -s /bin/sh sandbox 2>/dev/null 
 mkdir -p /sandbox /run/openshell && chown sandbox:sandbox /sandbox
 ` + d.claudeSetup() + `
 echo setup-ok`
-	return d.runLong(ctx, r.url, setupProc, setup, 5*time.Minute)
+	return d.runLong(ctx, r.blxName, setupProc, setup, 5*time.Minute)
 }
 
 // claudeSetup installs the native Claude Code binary as a real file (not a
@@ -575,13 +583,13 @@ func (d *Driver) reattach(ctx context.Context, r *record) error { return d.start
 
 func (d *Driver) start(ctx context.Context, r *record, restartSandbox bool) error {
 	tunnelRunning := false
-	if p, err := d.bl.GetProcess(ctx, r.url, tunnelProc); err == nil && p.Status == "running" {
+	if p, err := d.bl.GetProcess(ctx, r.blxName, tunnelProc); err == nil && p.Status == "running" {
 		tunnelRunning = true
 	}
 	if restartSandbox || !tunnelRunning {
 		// A fresh endpoint drops any session left from a previous run.
-		_ = d.bl.KillProcess(ctx, r.url, tunnelProc)
-		if _, err := d.bl.Exec(ctx, r.url, blaxel.ProcessRequest{
+		_ = d.bl.KillProcess(ctx, r.blxName, tunnelProc)
+		if _, err := d.bl.Exec(ctx, r.blxName, blaxel.ProcessRequest{
 			Name: tunnelProc, KeepAlive: true, Timeout: blaxel.Forever,
 			Command: fmt.Sprintf("%s/os-tunnel -ws :%d -local 127.0.0.1:%d", binDir, d.cfg.TunnelPort, d.cfg.InVMGatewayPort),
 		}); err != nil {
@@ -619,8 +627,8 @@ func (d *Driver) start(ctx context.Context, r *record, restartSandbox bool) erro
 	}
 
 	if restartSandbox {
-		_ = d.bl.KillProcess(ctx, r.url, sandboxProc)
-		if _, err := d.bl.Exec(ctx, r.url, blaxel.ProcessRequest{Name: sandboxProc, Command: "sh " + launchScript, KeepAlive: true, Timeout: blaxel.Forever}); err != nil {
+		_ = d.bl.KillProcess(ctx, r.blxName, sandboxProc)
+		if _, err := d.bl.Exec(ctx, r.blxName, blaxel.ProcessRequest{Name: sandboxProc, Command: "sh " + launchScript, KeepAlive: true, Timeout: blaxel.Forever}); err != nil {
 			cancel()
 			return fmt.Errorf("start openshell-sandbox: %w", err)
 		}
@@ -641,7 +649,7 @@ func (d *Driver) monitor(ctx context.Context, r *record) {
 			return
 		case <-time.After(interval):
 		}
-		p, err := d.bl.GetProcess(ctx, r.url, sandboxProc)
+		p, err := d.bl.GetProcess(ctx, r.blxName, sandboxProc)
 		if ctx.Err() != nil {
 			return
 		}
@@ -667,7 +675,7 @@ func (d *Driver) monitor(ctx context.Context, r *record) {
 			interval = 10 * time.Second
 			continue
 		}
-		if _, err := d.bl.Run(ctx, r.url, "test -S "+sshSocketPath); err == nil {
+		if _, err := d.bl.Run(ctx, r.blxName, "test -S "+sshSocketPath); err == nil {
 			d.mu.Lock()
 			r.ready = true
 			d.mu.Unlock()
@@ -677,9 +685,9 @@ func (d *Driver) monitor(ctx context.Context, r *record) {
 }
 
 // runLong runs a command that may outlast one sandbox-API request.
-func (d *Driver) runLong(ctx context.Context, url, name, script string, timeout time.Duration) error {
-	_ = d.bl.KillProcess(ctx, url, name)
-	if _, err := d.bl.Exec(ctx, url, blaxel.ProcessRequest{Name: name, Command: "sh -c " + shellQuote(script)}); err != nil {
+func (d *Driver) runLong(ctx context.Context, sandbox, name, script string, timeout time.Duration) error {
+	_ = d.bl.KillProcess(ctx, sandbox, name)
+	if _, err := d.bl.Exec(ctx, sandbox, blaxel.ProcessRequest{Name: name, Command: "sh -c " + shellQuote(script)}); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(timeout)
@@ -689,7 +697,7 @@ func (d *Driver) runLong(ctx context.Context, url, name, script string, timeout 
 			return ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
-		p, err := d.bl.GetProcess(ctx, url, name)
+		p, err := d.bl.GetProcess(ctx, sandbox, name)
 		if err != nil {
 			continue
 		}
@@ -716,16 +724,16 @@ func (d *Driver) Recover(ctx context.Context) error {
 		return err
 	}
 	for _, s := range all {
-		l := s.Metadata.Labels
-		if l[labelManaged] != "openshell-driver-blaxel" || l[labelID] == "" {
+		l := s.Labels
+		if l[labelManaged] != "openshell-driver-blaxel" || l[labelID] == "" || !d.owns(l) {
 			continue
 		}
 		r := &record{id: l[labelID], name: l[labelName], workspace: l[labelWorkspace], namespace: l[labelNamespace],
-			blxName: s.Metadata.Name, url: s.Metadata.URL}
+			blxName: s.Name, url: s.URL}
 		d.mu.Lock()
 		d.recs[r.id] = r
 		d.mu.Unlock()
-		p, err := d.bl.GetProcess(ctx, r.url, sandboxProc)
+		p, err := d.bl.GetProcess(ctx, r.blxName, sandboxProc)
 		if err == nil && p.Status == "running" {
 			d.log.Info("recovered running sandbox", "sandbox", r.name)
 			d.setStatus(r, ready("False", "Starting", "reattaching after driver restart"))
@@ -742,6 +750,15 @@ func (d *Driver) Recover(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// owns reports whether a sandbox's labels belong to this driver instance.
+func (d *Driver) owns(labels map[string]string) bool {
+	owner, ok := labels[labelOwner]
+	if !ok {
+		owner = DefaultOwner
+	}
+	return owner == sanitizeLabel(d.cfg.Owner)
 }
 
 // Close stops all tunnels (sandboxes keep running in Blaxel).

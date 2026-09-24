@@ -23,3 +23,9 @@ fi
 export BL_WORKSPACE BL_ENV BL_REGION OPENSHELL_GATEWAY_BIN GATEWAY_NAME GATEWAY_PORT DRIVER_SOCKET KERNEL_VARIANT SANDBOX_PACKAGES
 GW_DIR="$ROOT/gw"
 TLS_DIR="$GW_DIR/tls"
+# Per-gateway state so several instances can run side by side. The default
+# gateway keeps the historical file names.
+if [ "$GATEWAY_NAME" = blaxel ]; then STATE_PREFIX="$GW_DIR/"; else STATE_PREFIX="$GW_DIR/$GATEWAY_NAME-"; fi
+: "${GATEWAY_DB:=${STATE_PREFIX}gateway.db}"
+DRIVER_LOG="${STATE_PREFIX}driver.log"
+GATEWAY_LOG="${STATE_PREFIX}gateway.log"

@@ -30,6 +30,7 @@ func main() {
 	socket := flag.String("socket", "/tmp/openshell-blaxel/driver.sock", "Unix socket the gateway connects to")
 	workspace := flag.String("workspace", os.Getenv("BL_WORKSPACE"), "Blaxel workspace")
 	env := flag.String("env", envOr("BL_ENV", "prod"), "Blaxel environment: prod or dev")
+	flag.StringVar(&cfg.Owner, "owner", driver.DefaultOwner, "driver instance identity (use the gateway name); recovery only adopts sandboxes with this owner")
 	flag.StringVar(&cfg.Region, "region", "us-was-1", "Blaxel region")
 	flag.StringVar(&cfg.DefaultImage, "image", "blaxel/py-app:latest", "Blaxel image used when the request's image is not a Blaxel image")
 	flag.IntVar(&cfg.MemoryMiB, "memory", 4096, "default sandbox memory in MiB")
@@ -64,7 +65,12 @@ func main() {
 		}
 	}
 
-	d := driver.New(cfg, blaxel.NewClient(*workspace, *env), log)
+	bl, err := blaxel.NewClient(*workspace, *env)
+	if err != nil {
+		log.Error("blaxel", "err", err)
+		os.Exit(1)
+	}
+	d := driver.New(cfg, bl, log)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := d.Recover(ctx); err != nil {

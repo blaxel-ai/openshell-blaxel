@@ -2,7 +2,7 @@
 # Starts the Blaxel compute driver for the local gateway.
 . "$(dirname "$0")/env.sh"
 exec "$ROOT/driver/bin/openshell-driver-blaxel" \
-  -socket "$DRIVER_SOCKET" \
+  -socket "$DRIVER_SOCKET" -owner "$GATEWAY_NAME" \
   -workspace "$BL_WORKSPACE" -env "$BL_ENV" -region "$BL_REGION" \
   -gateway-addr "127.0.0.1:$GATEWAY_PORT" -vm-gateway-port "$GATEWAY_PORT" \
   -tls-dir "$TLS_DIR" \

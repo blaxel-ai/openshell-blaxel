@@ -6,7 +6,7 @@ Orientation for an AI coding agent, or a human, working in this repo. Read this 
 
 An external OpenShell (v0.0.116) compute driver that runs each OpenShell sandbox as a Blaxel microVM. The OpenShell gateway runs locally, and each sandbox reaches it through a reverse tunnel dialed by the driver.
 
-- `driver/`: Go. `cmd/openshell-driver-blaxel` (gRPC `ComputeDriver` on a Unix socket), `cmd/os-tunnel` (uploaded into each VM), `internal/blaxel` (REST client), `internal/tunnel` (yamux over WebSocket), `internal/driver` (lifecycle), `gen/computev1` (generated from `proto/`).
+- `driver/`: Go. `cmd/openshell-driver-blaxel` (gRPC `ComputeDriver` on a Unix socket), `cmd/os-tunnel` (uploaded into each VM), `internal/blaxel` (adapter over the Blaxel Go SDK `sdk-go`, the SDK used by `bl` in blaxel-ai/toolkit), `internal/tunnel` (yamux over WebSocket), `internal/driver` (lifecycle), `gen/computev1` (generated from `proto/`).
 - `gw/`: local gateway operation. `env.sh` (settings), `setup.sh`, `restart.sh`, `status.sh`, `cleanup.sh`, `e2e.sh`, `claude-code-blaxel.yaml`.
 - `experiments/`: feasibility probes and their scripts. They aren't part of the product.
 
@@ -33,7 +33,7 @@ Public quickstart: `README.md`. Design and operations: `GUIDE.md`. Machine summa
 | `make build` | builds the driver and linux `os-tunnel` | local, safe |
 | `make fetch` | downloads and checksum-verifies `openshell-sandbox` v0.0.116 | network read, local file |
 | `make setup` | gateway PKI + CLI registration | writes `gw/tls/` and `~/.config/openshell/gateways/blaxel` |
-| `make up` / `./gw/restart.sh` | (re)starts the driver + gateway | **drops every open sandbox session**; workloads survive |
+| `make up` / `./gw/restart.sh` | (re)starts this instance's driver + gateway | **drops every open session on this instance**; workloads survive |
 | `make configure` | enables `providers_v2_enabled`, imports the Claude profile | mutates gateway settings |
 | `make status` | health and sandbox mapping | read-only Blaxel and gateway calls |
 | `make e2e` | full end-to-end run | **creates and deletes a Blaxel sandbox** |
@@ -48,7 +48,7 @@ Public quickstart: `README.md`. Design and operations: `GUIDE.md`. Machine summa
 | Path | Responsibility |
 | -- | -- |
 | `driver/internal/driver/driver.go` | RPCs, provisioning, bootstrap script, launch env, monitor, recovery |
-| `driver/internal/blaxel/client.go` | Blaxel REST calls, mirroring `@blaxel/core` (API `2026-04-28`) |
+| `driver/internal/blaxel/client.go` | Blaxel operations through `github.com/blaxel-ai/sdk-go` v0.27.2: sandboxes, processes, files, auth headers. Don't hand-roll HTTP; extend the adapter |
 | `driver/internal/tunnel/tunnel.go` | reverse tunnel both halves, keepalive, reconnect |
 | `driver/proto/` | OpenShell v0.0.116 protos (Apache-2.0, NVIDIA), copied verbatim |
 | `gw/e2e.sh` | the acceptance test; add checks here for behavior changes |
@@ -57,7 +57,9 @@ Public quickstart: `README.md`. Design and operations: `GUIDE.md`. Machine summa
 
 ## Invariants
 
-- Start long-lived Blaxel processes with `keepAlive: true` **and** `timeout: 0` (`blaxel.Forever`). `omitempty` must not drop the zero, which is why `ProcessRequest.Timeout` is `*int`. Without it they die at 600 s.
+- Use the Blaxel Go SDK (`sdk-go`, as in blaxel-ai/toolkit) for every Blaxel call. The only non-SDK request is the tunnel WebSocket, which takes its auth from `Credentials.AuthHeaders`.
+- Start long-lived Blaxel processes with `keepAlive: true` **and** `timeout: 0` (`blaxel.Forever`). The zero must reach the wire (`client_test.go` checks it). Without it they die at 600 s.
+- Every sandbox carries `openshell.ai/driver-owner`. Recovery, `status` and `cleanup` must filter on it. Unlabeled sandboxes belong to `blaxel`. Never start a second driver with the same owner: it takes over the other instance's tunnels.
 - The Blaxel filesystem API ignores the multipart `permissions` field, so set modes in the bootstrap script.
 - In Blaxel's process API `HOME` is `/blaxel`. Pin `HOME` when installers depend on it (see `claudeSetup`).
 - Readiness is `/run/openshell/ssh.sock` existing, the same signal as the Podman driver.

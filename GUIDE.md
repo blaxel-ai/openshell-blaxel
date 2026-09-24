@@ -7,7 +7,7 @@ Use [README.md](README.md) for the shortest runnable path. This guide explains t
 | Owner | Responsibilities |
 | --- | --- |
 | OpenShell gateway | CLI API, mTLS, sandbox JWTs, policy storage and revisions, providers and credential resolution, SSH/exec relay, audit log aggregation |
-| `openshell-driver-blaxel` | `openshell.compute.v1.ComputeDriver` over a Unix socket: Blaxel sandbox lifecycle, bootstrap, reverse tunnel, readiness, recovery after restart |
+| `openshell-driver-blaxel` | `openshell.compute.v1.ComputeDriver` over a Unix socket: Blaxel sandbox lifecycle (through the Blaxel Go SDK `sdk-go`, as used by `bl`), bootstrap, reverse tunnel, readiness, recovery after restart |
 | Blaxel | microVM (mk3), kernel variant, process API, filesystem API, `/port/N` WebSocket ingress, standby |
 | `openshell-sandbox` (in VM, root) | Network namespace and veth, policy proxy (L4 + L7), TLS interception for credential injection, Landlock, seccomp, SSH server, process supervision |
 | Workload (in VM, uid 1500) | The agent: `claude`, `bash`, … |
@@ -50,14 +50,25 @@ All settings come from `gw/env.sh`. It loads `.env` when present, and the enviro
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `BL_WORKSPACE`, `BL_ENV`, `BL_REGION` | `charlou-dev`, `dev`, `us-was-1` | Where sandboxes are created |
-| `BL_API_KEY` | unset | Service-account key instead of the `bl login` session |
+| `BL_API_KEY` | unset | Service-account key instead of the `bl login` session. Without it, the SDK reads `~/.blaxel/config.yaml` like `bl` and refreshes the token |
 | `KERNEL_VARIANT` | `landlock` | `spec.runtime.extraArgs` key set to `enabled`. Empty means the default kernel |
 | `SANDBOX_PACKAGES` | `curl,git,ca-certificates` | Debian/Alpine packages installed as root at bootstrap |
-| `GATEWAY_NAME`, `GATEWAY_PORT` | `blaxel`, `17680` | CLI gateway name, and a loopback port used on the host and in each VM |
+| `GATEWAY_NAME`, `GATEWAY_PORT` | `blaxel`, `17680` | CLI gateway name, and a loopback port used on the host and in each VM. The name is also the driver owner (`-owner`) |
 | `DRIVER_SOCKET` | `/tmp/openshell-blaxel/driver.sock` | Driver socket. Its directory is 0700 and the socket 0600 |
 | `OPENSHELL_GATEWAY_BIN` | PATH, then Homebrew | v0.0.116 `openshell-gateway` |
 
 Driver flags not exposed in `env.sh` (see `driver/bin/openshell-driver-blaxel -h`): `-image` (default `blaxel/py-app:latest`), `-memory` (MiB, default 4096), `-install-claude` (default true), `-tunnel-port` (default 9000).
+
+### Several gateways in one workspace
+
+Each sandbox carries `openshell.ai/driver-owner=<GATEWAY_NAME>`. A driver only recovers its own sandboxes, and `status`/`cleanup` only list them. Sandboxes without the label (created before it existed) belong to the default owner `blaxel`. To run a second instance next to the default one:
+
+```bash
+export GATEWAY_NAME=blaxel-2 GATEWAY_PORT=17690 DRIVER_SOCKET=/tmp/openshell-blaxel-2/driver.sock
+./gw/setup.sh && ./gw/restart.sh && make configure
+```
+
+Its DB and logs go to `gw/blaxel-2-*`, and `restart.sh`/`make down` only stop processes matching its own gateway name and socket.
 
 ### Gateway settings applied by `make configure`
 
@@ -124,6 +135,8 @@ Every row below was observed while building this.
 | `Connection to sandbox closed by remote host` | Driver/gateway restart, or the sandbox ended | Reconnect with `exec`. The workload keeps running across restarts |
 | `invalid peer certificate: BadSignature` | `openshell gateway add --local` copied the Homebrew certs | `make setup` reinstalls this gateway's certs |
 | `unsupported extraArgs key "landlock"` | The control plane doesn't expose the variant | Needs a control-plane release that allows it |
+| Your sandboxes drop to `Provisioning` right after another driver starts | A second driver with the same owner adopted them and took over their tunnels (`os-tunnel` accepts one host session) | Give each instance its own `GATEWAY_NAME`. Stop the intruder, and the original tunnels reconnect within ~30 s |
+| `no Blaxel credentials for workspace …` at driver start | No `bl login` session for that workspace and no `BL_API_KEY` | `bl login <workspace>` |
 
 ## Verification ladder
 

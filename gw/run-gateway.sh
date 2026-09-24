@@ -5,6 +5,6 @@
 export OPENSHELL_LOCAL_TLS_DIR="$TLS_DIR"
 exec "$OPENSHELL_GATEWAY_BIN" \
   --name "$GATEWAY_NAME" --bind-address 127.0.0.1 --port "$GATEWAY_PORT" \
-  --db-url "sqlite:$GW_DIR/gateway.db?mode=rwc" --log-level info \
+  --db-url "sqlite:$GATEWAY_DB?mode=rwc" --log-level info \
   --enable-mtls-auth true \
   --drivers blaxel --compute-driver-socket "$DRIVER_SOCKET"

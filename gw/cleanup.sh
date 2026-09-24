@@ -28,7 +28,10 @@ import json, os, sys
 known = set(os.environ["KNOWN"].split())
 for s in json.load(sys.stdin):
     l = s.get("metadata", {}).get("labels") or {}
-    if l.get("openshell.ai/managed-by") == "openshell-driver-blaxel" and l.get("openshell.ai/sandbox-name") not in known:
+    # Only sandboxes owned by this instance: another gateway sharing the workspace
+    # would otherwise look like orphans.
+    if (l.get("openshell.ai/managed-by") == "openshell-driver-blaxel" and l.get("openshell.ai/driver-owner", "blaxel") == os.environ["GATEWAY_NAME"]
+            and l.get("openshell.ai/sandbox-name") not in known):
         print(s["metadata"]["name"])'); do
     plan="$plan
 bl delete sandbox $b -w $BL_WORKSPACE"

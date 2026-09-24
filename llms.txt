@@ -13,7 +13,8 @@ An external OpenShell v0.0.116 compute driver that runs each OpenShell sandbox a
 ## Current contract
 
 - OpenShell: v0.0.116 compute-driver protocol `openshell.compute.v1`, gateway, CLI and `openshell-sandbox` runtime.
-- Blaxel API version `2026-04-28`, generation `mk3`, `spec.runtime.extraArgs: {landlock: enabled}` (Linux 6.18, Landlock ABI v7).
+- Blaxel Go SDK `github.com/blaxel-ai/sdk-go` v0.27.2 (as used by blaxel-ai/toolkit / `bl`), generation `mk3`, `spec.runtime.extraArgs: {landlock: enabled}` (Linux 6.18, Landlock ABI v7).
+- Sandboxes are labeled `openshell.ai/driver-owner=<gateway name>`. Instances only manage their own.
 - Default image `blaxel/py-app:latest`. Workload uid 1500 `sandbox`, `HOME=/sandbox`.
 - Gateway settings: `providers_v2_enabled=true`, provider profile `claude-code-blaxel`.
 
@@ -51,7 +52,7 @@ openshell -g blaxel logs dev
 
 - `driver/internal/driver/driver.go`: lifecycle, bootstrap, launch env, readiness, recovery.
 - `driver/internal/tunnel/tunnel.go`: reverse tunnel.
-- `driver/internal/blaxel/client.go`: Blaxel REST client.
+- `driver/internal/blaxel/client.go`: adapter over the Blaxel Go SDK.
 - `gw/e2e.sh`: acceptance test.
 - `GUIDE.md`: design, security, failure handling, teardown.
 - `docs/KERNEL.md`, `docs/CLAUDE-CODE.md`, `docs/ROADMAP.md`, `docs/RESULTS.md`.

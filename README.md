@@ -60,7 +60,7 @@ RESULT: 22 passed, 0 failed
 ## Start here
 
 You need:
-- a Blaxel workspace with the `landlock` kernel variant, and the `bl` CLI logged in with `bl login <workspace>`;
+- a Blaxel workspace with the `landlock` kernel variant, and the `bl` CLI from [blaxel-ai/toolkit](https://github.com/blaxel-ai/toolkit) (`brew install blaxel-ai/blaxel/blaxel`), logged in with `bl login <workspace>`;
 - Go 1.25+ and `gh` (to fetch the OpenShell runtime);
 - OpenShell **v0.0.116**, installed with `brew install nvidia/openshell/openshell`.
 
@@ -160,7 +160,9 @@ openshell -g blaxel logs <name>              # OCSF audit trail: ALLOWED / DENIE
 ## Production guardrails
 
 - The workload runs as uid 1500 with zero capabilities under Landlock, seccomp and a network namespace. Its only route out is the supervisor's policy proxy.
+- The driver talks to Blaxel through the official Go SDK ([`sdk-go`](https://github.com/blaxel-ai/sdk-go), the SDK behind `bl` in [blaxel-ai/toolkit](https://github.com/blaxel-ai/toolkit)). It authenticates exactly like `bl`: `BL_API_KEY`, or the `bl login` session with automatic refresh.
 - The VM never holds Blaxel credentials. The driver dials the tunnel in, and the in-VM endpoint drops connections until the driver attaches.
+- Every sandbox is labeled with its driver instance (`openshell.ai/driver-owner`). Recovery, `status` and `cleanup` only touch their own instance, so several gateways can share a workspace.
 - The gateway's mTLS runs end to end inside the tunnel, so Blaxel's edge only sees opaque bytes.
 - Provider keys stay in the gateway. The workload gets placeholders, and the proxy injects the real header on allowed requests only.
 - User environment can't override driver-owned `OPENSHELL_*` variables. Values are shell-quoted, and invalid names are dropped (unit-tested).
@@ -185,7 +187,7 @@ CI runs formatting, vet, `go test -race`, cross-builds and a script syntax check
 This repository targets:
 
 - OpenShell **v0.0.116** compute-driver protocol (`openshell.compute.v1`, [driver/proto](driver/proto)), gateway, CLI and `openshell-sandbox` runtime.
-- Blaxel API version `2026-04-28`, sandbox generation `mk3`, kernel variant `landlock` (`spec.runtime.extraArgs`).
+- Blaxel Go SDK [`github.com/blaxel-ai/sdk-go`](https://github.com/blaxel-ai/sdk-go) **v0.27.2** (the version used by [blaxel-ai/toolkit](https://github.com/blaxel-ai/toolkit)), sandbox generation `mk3`, kernel variant `landlock` (`spec.runtime.extraArgs`).
 - Claude Code 2.1.x (installed at bootstrap), with the `claude-code-blaxel` provider profile.
 
 Primary references: [OpenShell](https://github.com/NVIDIA/OpenShell), [OpenShell providers](https://github.com/NVIDIA/OpenShell/blob/main/docs/sandboxes/manage-providers.mdx), [RFC 0012: isolation backends](https://github.com/NVIDIA/OpenShell/tree/main/rfc/0012-isolation-backend), [Blaxel sandboxes](https://docs.blaxel.ai/Sandboxes/Overview), [Blaxel processes](https://docs.blaxel.ai/Sandboxes/Processes), [Landlock](https://docs.kernel.org/userspace-api/landlock.html).

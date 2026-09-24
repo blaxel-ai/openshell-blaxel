@@ -62,7 +62,7 @@ e2e:
 
 ## down: stop driver + gateway (Blaxel sandboxes keep running)
 down:
-	-. ./gw/env.sh && pkill -f "openshell-gateway --name $$GATEWAY_NAME" ; pkill -f 'bin/openshell-driver-blaxel'
+	-. ./gw/env.sh && pkill -f "openshell-gateway --name $$GATEWAY_NAME " ; pkill -f "openshell-driver-blaxel -socket $$DRIVER_SOCKET "
 
 clean:
 	rm -rf bin driver/bin

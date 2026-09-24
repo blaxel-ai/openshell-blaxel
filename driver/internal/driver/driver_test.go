@@ -126,3 +126,18 @@ func TestImageSubstitution(t *testing.T) {
 		}
 	}
 }
+
+func TestOwnershipScopesRecovery(t *testing.T) {
+	d := testDriver()
+	d.cfg.Owner = "blaxel"
+	if !d.owns(map[string]string{}) {
+		t.Error("the default owner must adopt pre-label sandboxes")
+	}
+	if d.owns(map[string]string{labelOwner: "blaxel-sdk"}) {
+		t.Error("must not adopt another instance's sandbox")
+	}
+	d.cfg.Owner = "blaxel-sdk"
+	if d.owns(map[string]string{}) || !d.owns(map[string]string{labelOwner: "blaxel-sdk"}) {
+		t.Error("a non-default owner adopts only its own sandboxes")
+	}
+}

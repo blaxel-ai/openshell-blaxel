@@ -5,7 +5,7 @@
 
 echo "== gateway '$GATEWAY_NAME' (127.0.0.1:$GATEWAY_PORT)"
 openshell -g "$GATEWAY_NAME" status 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' | grep -E 'Status:|Authentication:|Version:|Error' | sed 's/^ */  /'
-printf '  driver process: '; pgrep -f 'bin/openshell-driver-blaxel' >/dev/null && echo running || echo "NOT RUNNING"
+printf '  driver process: '; pgrep -f "openshell-driver-blaxel -socket $DRIVER_SOCKET " >/dev/null && echo running || echo "NOT RUNNING"
 printf '  driver socket:  '; [ -S "$DRIVER_SOCKET" ] && echo "$DRIVER_SOCKET" || echo "MISSING ($DRIVER_SOCKET)"
 printf '  providers_v2:   '; openshell -g "$GATEWAY_NAME" settings get --global 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | grep -q 'providers_v2_enabled.*true' && echo enabled || echo "disabled (run: make configure)"
 
@@ -26,7 +26,8 @@ except json.JSONDecodeError:
 managed = {}
 for s in blx:
     labels = s.get("metadata", {}).get("labels") or {}
-    if labels.get("openshell.ai/managed-by") == "openshell-driver-blaxel":
+    l = labels
+    if labels.get("openshell.ai/managed-by") == "openshell-driver-blaxel" and l.get("openshell.ai/driver-owner", "blaxel") == os.environ["GATEWAY_NAME"]:
         managed[labels.get("openshell.ai/sandbox-name", "?")] = (
             s["metadata"]["name"], s.get("status", "?"),
             (s.get("spec", {}).get("runtime", {}).get("extraArgs") or {}))
