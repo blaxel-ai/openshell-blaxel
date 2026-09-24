@@ -3,6 +3,13 @@
 # of these in the environment before running the scripts in this directory.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Optional local overrides (gitignored); see .env.example.
+if [ -f "$ROOT/.env" ]; then
+  set -a
+  . "$ROOT/.env"
+  set +a
+fi
+
 : "${BL_WORKSPACE:=charlou-dev}"
 : "${BL_ENV:=dev}"
 : "${BL_REGION:=us-was-1}"

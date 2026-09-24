@@ -1,0 +1,57 @@
+# OpenShell on Blaxel
+
+An external OpenShell v0.0.116 compute driver that runs each OpenShell sandbox as a Blaxel mk3 microVM on the `landlock` kernel variant. The gateway runs locally, and sandboxes reach it through a reverse tunnel (WebSocket + yamux) dialed by the driver.
+
+## Fast route
+
+1. Read `AGENTS.md`, `README.md`, then `.env.example`.
+2. `make test` (local, safe).
+3. `make setup`, then `make up` (this restarts the driver + gateway and drops open sessions: ask first).
+4. `make status`.
+5. `make e2e` only with approval: it creates and deletes a Blaxel sandbox.
+
+## Current contract
+
+- OpenShell: v0.0.116 compute-driver protocol `openshell.compute.v1`, gateway, CLI and `openshell-sandbox` runtime.
+- Blaxel API version `2026-04-28`, generation `mk3`, `spec.runtime.extraArgs: {landlock: enabled}` (Linux 6.18, Landlock ABI v7).
+- Default image `blaxel/py-app:latest`. Workload uid 1500 `sandbox`, `HOME=/sandbox`.
+- Gateway settings: `providers_v2_enabled=true`, provider profile `claude-code-blaxel`.
+
+## Key commands
+
+```bash
+make test
+make up
+make status
+make e2e
+openshell -g blaxel sandbox create --name dev --no-tty -- sleep infinity
+openshell -g blaxel sandbox exec -n dev --tty -- bash -l
+openshell -g blaxel logs dev
+./gw/cleanup.sh dev            # plan
+./gw/cleanup.sh dev --apply
+./gw/cleanup.sh --orphans
+```
+
+## Proof rules
+
+- `RESULT: 22 passed, 0 failed` from `make e2e` proves lifecycle, exec, network policy (L4 + L7), Landlock and stop/start.
+- A matching `os-<name>-<hash>` Blaxel sandbox in `make status` proves Blaxel placement.
+- `"qualified": true` from `openshell-sandbox capability-probe-launch 1500 1500` (OpenShell `main`) proves the kernel, not the driver.
+
+## Safety
+
+- The workload has no root, no capabilities, Landlock, seccomp and a netns. Egress goes only through the supervisor proxy.
+- Provider keys stay in the gateway. The workload sees placeholders.
+- The VM holds no Blaxel credentials. The tunnel is dialed from the host.
+- v0.0.116 limitation: the in-VM supervisor is root and holds the gateway client cert + sandbox JWT.
+- Cleanup is plan-only unless `--apply` is given.
+- Restarts keep workloads running but drop sessions.
+
+## Key files
+
+- `driver/internal/driver/driver.go`: lifecycle, bootstrap, launch env, readiness, recovery.
+- `driver/internal/tunnel/tunnel.go`: reverse tunnel.
+- `driver/internal/blaxel/client.go`: Blaxel REST client.
+- `gw/e2e.sh`: acceptance test.
+- `GUIDE.md`: design, security, failure handling, teardown.
+- `docs/KERNEL.md`, `docs/CLAUDE-CODE.md`, `docs/ROADMAP.md`, `docs/RESULTS.md`.
