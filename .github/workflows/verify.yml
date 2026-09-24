@@ -1,0 +1,60 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  driver:
+    name: Driver build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: driver/go.mod
+          cache-dependency-path: driver/go.sum
+
+      - name: Check formatting
+        working-directory: driver
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      - name: Vet
+        working-directory: driver
+        run: go vet ./...
+
+      - name: Unit tests
+        working-directory: driver
+        run: go test -race ./...
+
+      - name: Build driver (linux, darwin) and os-tunnel (linux)
+        working-directory: driver
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/openshell-driver-blaxel
+          GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/openshell-driver-blaxel
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/os-tunnel
+
+  scripts:
+    name: Script syntax
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Parse shell scripts (with the shell named in each shebang)
+        run: for f in gw/*.sh; do case "$(head -n1 "$f")" in *bash*) bash -n "$f" ;; *) sh -n "$f" ;; esac || exit 1; done
+
+      - name: Check patch whitespace
+        if: github.event_name == 'pull_request'
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"

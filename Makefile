@@ -4,7 +4,7 @@ GOBIN_DIR := $(HOME)/go/bin
 MODULE := github.com/blaxel-ai/openshell-blaxel/driver
 PROTO_MAP := Mcompute_driver.proto=$(MODULE)/gen/computev1,Moptions.proto=$(MODULE)/gen/computev1
 
-.PHONY: all fetch build proto setup up configure e2e down clean
+.PHONY: all fetch build test proto setup up configure e2e status down clean
 
 all: fetch build
 
@@ -23,6 +23,15 @@ build:
 	cd driver && go vet ./... && \
 	go build -o bin/openshell-driver-blaxel ./cmd/openshell-driver-blaxel && \
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/os-tunnel-linux-amd64 ./cmd/os-tunnel
+
+## test: unit tests (driver helpers, tunnel round trip) and script syntax
+test:
+	cd driver && go test ./...
+	for f in gw/*.sh; do case "$$(head -n1 "$$f")" in *bash*) bash -n "$$f" ;; *) sh -n "$$f" ;; esac || exit 1; done
+
+## status: gateway/driver health and OpenShell <-> Blaxel sandbox mapping
+status:
+	./gw/status.sh
 
 ## proto: regenerate Go stubs from driver/proto (OpenShell v0.0.116 contract)
 proto:
@@ -53,7 +62,7 @@ e2e:
 
 ## down: stop driver + gateway (Blaxel sandboxes keep running)
 down:
-	-. ./gw/env.sh && pkill -f "openshell-gateway --name $$GATEWAY_NAME" ; pkill -f 'bin/openshell-driver-blaxel'
+	-. ./gw/env.sh && pkill -f "openshell-gateway --name $$GATEWAY_NAME " ; pkill -f "openshell-driver-blaxel -socket $$DRIVER_SOCKET "
 
 clean:
 	rm -rf bin driver/bin

@@ -1,258 +1,213 @@
-// Package blaxel is a minimal client for the Blaxel control-plane and sandbox
-// APIs, covering what the OpenShell driver needs. Request shapes mirror what
-// @blaxel/core sends (traced against API version 2026-04-28).
+// Package blaxel adapts the official Blaxel Go SDK (github.com/blaxel-ai/sdk-go,
+// the SDK behind the `bl` CLI in blaxel-ai/toolkit) to the few operations the
+// OpenShell driver needs.
 package blaxel
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"mime/multipart"
 	"net/http"
-	"net/url"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
-	"time"
-)
 
-const apiVersion = "2026-04-28"
+	sdk "github.com/blaxel-ai/sdk-go"
+	"github.com/blaxel-ai/sdk-go/option"
+)
 
 // ErrNotFound is returned when a sandbox or process does not exist.
 var ErrNotFound = errors.New("not found")
 
 type Client struct {
 	Workspace string
-	BaseURL   string // e.g. https://api.blaxel.dev/v0
-	HTTP      *http.Client
 
-	mu      sync.Mutex
-	token   string
-	tokenAt time.Time
-	apiKey  string
+	sdk   *sdk.Client
+	creds sdk.Credentials
+
+	mu        sync.Mutex
+	instances map[string]*sdk.SandboxInstance // by sandbox name
 }
 
-// NewClient builds a client for workspace. env is "prod" or "dev". It uses
-// BL_API_KEY when set, otherwise the logged-in `bl` CLI session.
-func NewClient(workspace, env string) *Client {
-	base := "https://api.blaxel.ai/v0"
-	if env == "dev" {
-		base = "https://api.blaxel.dev/v0"
+// NewClient authenticates like `bl`: BL_API_KEY when set, otherwise the
+// workspace's `bl login` session (refreshed automatically by the SDK). env is
+// "prod" or "dev".
+func NewClient(workspace, env string) (*Client, error) {
+	if env != "" {
+		os.Setenv("BL_ENV", env)
 	}
-	return &Client{
-		Workspace: workspace,
-		BaseURL:   base,
-		HTTP:      &http.Client{Timeout: 90 * time.Second},
-		apiKey:    os.Getenv("BL_API_KEY"),
+	opts := []option.RequestOption{
+		option.WithWorkspace(workspace),
+		option.WithHeader("User-Agent", "openshell-driver-blaxel"),
 	}
-}
-
-// Token returns a bearer token, refreshing the CLI session token every few
-// minutes (OAuth access tokens are short-lived).
-func (c *Client) Token() (string, error) {
-	if c.apiKey != "" {
-		return c.apiKey, nil
+	c := &Client{Workspace: workspace, instances: map[string]*sdk.SandboxInstance{}}
+	if key := os.Getenv("BL_API_KEY"); key != "" {
+		sdk.InitializeEnvironment(workspace)
+		c.creds = sdk.Credentials{APIKey: key}
+		client := sdk.NewClient(append(opts, option.WithBaseURL(sdk.GetBaseURL()), option.WithAPIKey(key))...)
+		c.sdk = &client
+		return c, nil
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.token != "" && time.Since(c.tokenAt) < 5*time.Minute {
-		return c.token, nil
-	}
-	out, err := exec.Command("bl", "token", "-w", c.Workspace).Output()
+	client, err := sdk.NewClientFromConfig(workspace, opts...)
 	if err != nil {
-		return "", fmt.Errorf("bl token: %w", err)
+		return nil, fmt.Errorf("blaxel client for workspace %q (run `bl login %s`): %w", workspace, workspace, err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	c.token = strings.TrimSpace(lines[len(lines)-1])
-	c.tokenAt = time.Now()
-	return c.token, nil
+	creds, err := sdk.LoadCredentials(workspace)
+	if err != nil || !creds.IsValid() {
+		return nil, fmt.Errorf("no Blaxel credentials for workspace %q; run `bl login %s` or set BL_API_KEY", workspace, workspace)
+	}
+	c.sdk, c.creds = client, creds
+	return c, nil
 }
 
-// Headers are the auth headers for REST and WebSocket requests.
+// Headers returns fresh auth headers for requests the SDK does not make
+// itself (the tunnel WebSocket).
 func (c *Client) Headers() (http.Header, error) {
-	tok, err := c.Token()
+	auth, err := c.creds.AuthHeaders(context.Background(), c.Workspace)
 	if err != nil {
 		return nil, err
 	}
 	h := http.Header{}
-	h.Set("X-Blaxel-Authorization", "Bearer "+tok)
-	h.Set("Authorization", "Bearer "+tok)
+	for k, v := range auth {
+		h.Set(k, v)
+	}
+	if bearer := h.Get("X-Blaxel-Authorization"); bearer != "" {
+		h.Set("Authorization", bearer)
+	}
 	h.Set("X-Blaxel-Workspace", c.Workspace)
-	h.Set("Blaxel-Version", apiVersion)
 	return h, nil
 }
 
-func (c *Client) do(ctx context.Context, method, rawURL string, body io.Reader, contentType string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
-	if err != nil {
-		return err
+func notFound(err error) error {
+	var apiErr *sdk.Error
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w: %v", ErrNotFound, err)
 	}
-	h, err := c.Headers()
-	if err != nil {
-		return err
-	}
-	req.Header = h
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	}
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("%s %s: %w", method, rawURL, ErrNotFound)
-	}
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("%s %s: HTTP %d: %s", method, rawURL, resp.StatusCode, truncate(string(data), 300))
-	}
-	if out != nil && len(data) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
-			return fmt.Errorf("%s %s: decode: %w", method, rawURL, err)
-		}
-	}
-	return nil
+	return err
 }
 
-func truncate(s string, n int) string {
-	if len(s) > n {
-		return s[:n] + "…"
-	}
-	return s
-}
-
-func jsonBody(v any) (io.Reader, error) {
-	b, err := json.Marshal(v)
-	return bytes.NewReader(b), err
-}
-
-// ---- control plane ----
+// ---- sandboxes ----
 
 type Port struct {
-	Target   int    `json:"target"`
-	Protocol string `json:"protocol,omitempty"`
+	Target   int
+	Protocol string
 }
 
-type EnvVar struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
-}
-
-type Runtime struct {
-	Image      string   `json:"image,omitempty"`
-	Memory     int      `json:"memory,omitempty"`
-	Ports      []Port   `json:"ports,omitempty"`
-	Envs       []EnvVar `json:"envs,omitempty"`
-	Generation string   `json:"generation,omitempty"`
+// SandboxSpec is what the driver creates.
+type SandboxSpec struct {
+	Name      string
+	Labels    map[string]string
+	Region    string
+	Image     string
+	MemoryMiB int
+	Ports     []Port
 	// ExtraArgs selects the kernel variant, e.g. {"landlock": "enabled"}.
-	ExtraArgs map[string]string `json:"extraArgs,omitempty"`
+	ExtraArgs map[string]string
 }
 
-type Metadata struct {
-	Name      string            `json:"name"`
-	Labels    map[string]string `json:"labels,omitempty"`
-	URL       string            `json:"url,omitempty"`
-	CreatedAt string            `json:"createdAt,omitempty"`
-}
-
-type Spec struct {
-	Region  string  `json:"region,omitempty"`
-	Runtime Runtime `json:"runtime"`
-}
-
+// Sandbox is the subset of the Blaxel sandbox the driver reads.
 type Sandbox struct {
-	Metadata Metadata `json:"metadata"`
-	Spec     Spec     `json:"spec"`
-	Status   string   `json:"status,omitempty"`
+	Name   string
+	Labels map[string]string
+	URL    string
+	Status string
 }
 
-func (c *Client) CreateSandbox(ctx context.Context, sb Sandbox) (*Sandbox, error) {
-	body, err := jsonBody(sb)
+func fromSDK(s *sdk.Sandbox) *Sandbox {
+	return &Sandbox{Name: s.Metadata.Name, Labels: s.Metadata.Labels, URL: s.Metadata.URL, Status: string(s.Status)}
+}
+
+func (c *Client) cache(inst *sdk.SandboxInstance) {
+	c.mu.Lock()
+	c.instances[inst.Metadata.Name] = inst
+	c.mu.Unlock()
+}
+
+func (c *Client) CreateSandbox(ctx context.Context, spec SandboxSpec) (*Sandbox, error) {
+	ports := make([]sdk.PortParam, 0, len(spec.Ports))
+	for _, p := range spec.Ports {
+		ports = append(ports, sdk.PortParam{Target: int64(p.Target), Protocol: sdk.PortProtocol(strings.ToUpper(p.Protocol))})
+	}
+	inst, err := c.sdk.Sandboxes.NewInstance(ctx, sdk.SandboxNewParams{Sandbox: sdk.SandboxParam{
+		Metadata: sdk.MetadataParam{Name: spec.Name, Labels: spec.Labels},
+		Spec: sdk.SandboxSpecParam{
+			Region: sdk.String(spec.Region),
+			Runtime: sdk.SandboxRuntimeParam{
+				Image:     sdk.String(spec.Image),
+				Memory:    sdk.Int(int64(spec.MemoryMiB)),
+				Ports:     ports,
+				ExtraArgs: spec.ExtraArgs,
+			},
+		},
+	}})
 	if err != nil {
 		return nil, err
 	}
-	var out Sandbox
-	if err := c.do(ctx, http.MethodPost, c.BaseURL+"/sandboxes", body, "application/json", &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	c.cache(inst)
+	return fromSDK(inst.Sandbox), nil
 }
 
 func (c *Client) GetSandbox(ctx context.Context, name string) (*Sandbox, error) {
-	var out Sandbox
-	if err := c.do(ctx, http.MethodGet, c.BaseURL+"/sandboxes/"+url.PathEscape(name), nil, "", &out); err != nil {
-		return nil, err
+	inst, err := c.sdk.Sandboxes.GetInstance(ctx, name)
+	if err != nil {
+		return nil, notFound(err)
 	}
-	return &out, nil
+	c.cache(inst)
+	return fromSDK(inst.Sandbox), nil
 }
 
-// ListSandboxes follows cursor pagination and accepts both the bare-array
-// and the {data, meta} response shapes.
 func (c *Client) ListSandboxes(ctx context.Context) ([]Sandbox, error) {
-	var all []Sandbox
-	cursor := ""
-	for page := 0; page < 100; page++ {
-		u := c.BaseURL + "/sandboxes?limit=100"
-		if cursor != "" {
-			u += "&cursor=" + url.QueryEscape(cursor)
+	page, err := c.sdk.Sandboxes.ListInstances(ctx, sdk.SandboxListParams{Limit: sdk.Int(100)})
+	var out []Sandbox
+	for err == nil && page != nil {
+		for _, inst := range page.Data {
+			c.cache(inst)
+			out = append(out, *fromSDK(inst.Sandbox))
 		}
-		var raw json.RawMessage
-		if err := c.do(ctx, http.MethodGet, u, nil, "", &raw); err != nil {
-			return nil, err
+		if !page.HasNextPage() {
+			break
 		}
-		var arr []Sandbox
-		if json.Unmarshal(raw, &arr) == nil {
-			return append(all, arr...), nil
-		}
-		var wrapped struct {
-			Data []Sandbox `json:"data"`
-			Meta struct {
-				NextCursor string `json:"nextCursor"`
-				HasMore    bool   `json:"hasMore"`
-			} `json:"meta"`
-		}
-		if err := json.Unmarshal(raw, &wrapped); err != nil {
-			return nil, fmt.Errorf("list sandboxes: decode: %w", err)
-		}
-		all = append(all, wrapped.Data...)
-		if wrapped.Meta.NextCursor == "" || !wrapped.Meta.HasMore {
-			return all, nil
-		}
-		cursor = wrapped.Meta.NextCursor
+		page, err = page.NextPage(ctx)
 	}
-	return all, nil
+	return out, err
 }
 
 func (c *Client) DeleteSandbox(ctx context.Context, name string) error {
-	return c.do(ctx, http.MethodDelete, c.BaseURL+"/sandboxes/"+url.PathEscape(name), nil, "", nil)
+	_, err := c.sdk.Sandboxes.DeleteInstance(ctx, name)
+	c.mu.Lock()
+	delete(c.instances, name)
+	c.mu.Unlock()
+	return notFound(err)
 }
 
-// ---- sandbox API (per-sandbox URL) ----
+// instance returns the cached SDK instance (with its sandbox-API client).
+func (c *Client) instance(ctx context.Context, name string) (*sdk.SandboxInstance, error) {
+	c.mu.Lock()
+	inst := c.instances[name]
+	c.mu.Unlock()
+	if inst != nil {
+		return inst, nil
+	}
+	if _, err := c.GetSandbox(ctx, name); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.instances[name], nil
+}
+
+// ---- processes and files (sandbox API) ----
 
 type ProcessRequest struct {
-	Name              string            `json:"name,omitempty"`
-	Command           string            `json:"command"`
-	Env               map[string]string `json:"env,omitempty"`
-	WorkingDir        string            `json:"workingDir,omitempty"`
-	WaitForCompletion bool              `json:"waitForCompletion,omitempty"`
-	// Timeout is sent even when zero: with KeepAlive, Blaxel auto-kills the
-	// process after 600 s unless timeout is explicitly 0 (infinite).
-	Timeout      *int  `json:"timeout,omitempty"`
-	KeepAlive    bool  `json:"keepAlive,omitempty"`
-	WaitForPorts []int `json:"waitForPorts,omitempty"`
-}
-
-type Process struct {
-	Name     string `json:"name"`
-	PID      string `json:"pid"`
-	Status   string `json:"status"` // running | completed | failed | killed | stopped
-	ExitCode int    `json:"exitCode"`
-	Logs     string `json:"logs"`
+	Name              string
+	Command           string
+	Env               map[string]string
+	WorkingDir        string
+	WaitForCompletion bool
+	KeepAlive         bool
+	// Timeout in seconds. Nil leaves the API default; with KeepAlive, Blaxel
+	// kills the process after 600 s unless Timeout is explicitly 0 (Forever).
+	Timeout *int
 }
 
 // Seconds returns a timeout value for ProcessRequest.
@@ -261,21 +216,50 @@ func Seconds(n int) *int { return &n }
 // Forever is the timeout for long-lived keepAlive processes.
 var Forever = Seconds(0)
 
-func (c *Client) Exec(ctx context.Context, sandboxURL string, req ProcessRequest) (*Process, error) {
-	body, err := jsonBody(req)
+type Process struct {
+	Name     string
+	Status   string // running | completed | failed | killed | stopped
+	ExitCode int
+	Logs     string
+}
+
+// processParam converts a request to the SDK form. An explicit zero timeout
+// must survive: param.Opt marks it present, unlike a plain omitempty int.
+func processParam(req ProcessRequest) sdk.ProcessRequestParam {
+	p := sdk.ProcessRequestParam{Command: req.Command, Env: req.Env}
+	if req.Name != "" {
+		p.Name = sdk.String(req.Name)
+	}
+	if req.WorkingDir != "" {
+		p.WorkingDir = sdk.String(req.WorkingDir)
+	}
+	if req.WaitForCompletion {
+		p.WaitForCompletion = sdk.Bool(true)
+	}
+	if req.KeepAlive {
+		p.KeepAlive = sdk.Bool(true)
+	}
+	if req.Timeout != nil {
+		p.Timeout = sdk.Int(int64(*req.Timeout))
+	}
+	return p
+}
+
+func (c *Client) Exec(ctx context.Context, sandbox string, req ProcessRequest) (*Process, error) {
+	inst, err := c.instance(ctx, sandbox)
 	if err != nil {
 		return nil, err
 	}
-	var out Process
-	if err := c.do(ctx, http.MethodPost, sandboxURL+"/process", body, "application/json", &out); err != nil {
-		return nil, err
+	resp, err := inst.Process.New(ctx, processParam(req))
+	if err != nil {
+		return nil, notFound(err)
 	}
-	return &out, nil
+	return &Process{Name: resp.Name, Status: string(resp.Status), ExitCode: int(resp.ExitCode), Logs: resp.Logs}, nil
 }
 
 // Run executes a shell command to completion and fails on non-zero exit.
-func (c *Client) Run(ctx context.Context, sandboxURL, command string) (string, error) {
-	p, err := c.Exec(ctx, sandboxURL, ProcessRequest{Command: command, WaitForCompletion: true, Timeout: Seconds(55)})
+func (c *Client) Run(ctx context.Context, sandbox, command string) (string, error) {
+	p, err := c.Exec(ctx, sandbox, ProcessRequest{Command: command, WaitForCompletion: true, Timeout: Seconds(55)})
 	if err != nil {
 		return "", err
 	}
@@ -285,30 +269,41 @@ func (c *Client) Run(ctx context.Context, sandboxURL, command string) (string, e
 	return p.Logs, nil
 }
 
-func (c *Client) GetProcess(ctx context.Context, sandboxURL, name string) (*Process, error) {
-	var out Process
-	if err := c.do(ctx, http.MethodGet, sandboxURL+"/process/"+url.PathEscape(name), nil, "", &out); err != nil {
+func (c *Client) GetProcess(ctx context.Context, sandbox, name string) (*Process, error) {
+	inst, err := c.instance(ctx, sandbox)
+	if err != nil {
 		return nil, err
 	}
-	return &out, nil
+	resp, err := inst.Process.Get(ctx, name)
+	if err != nil {
+		return nil, notFound(err)
+	}
+	return &Process{Name: resp.Name, Status: string(resp.Status), ExitCode: int(resp.ExitCode), Logs: resp.Logs}, nil
 }
 
-func (c *Client) KillProcess(ctx context.Context, sandboxURL, name string) error {
-	return c.do(ctx, http.MethodDelete, sandboxURL+"/process/"+url.PathEscape(name)+"/kill", nil, "", nil)
+func (c *Client) KillProcess(ctx context.Context, sandbox, name string) error {
+	inst, err := c.instance(ctx, sandbox)
+	if err != nil {
+		return err
+	}
+	_, err = inst.Process.Kill(ctx, name)
+	return notFound(err)
 }
 
 // WriteFile uploads content to path. The sandbox API currently ignores perm;
 // callers must chmod afterwards.
-func (c *Client) WriteFile(ctx context.Context, sandboxURL, path string, content []byte, perm string) error {
-	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-	fw, err := mw.CreateFormFile("file", "upload.bin")
+func (c *Client) WriteFile(ctx context.Context, sandbox, path string, content []byte, perm string) error {
+	inst, err := c.instance(ctx, sandbox)
 	if err != nil {
 		return err
 	}
-	fw.Write(content)
-	mw.WriteField("permissions", perm)
-	mw.WriteField("path", path)
-	mw.Close()
-	return c.do(ctx, http.MethodPut, sandboxURL+"/filesystem/"+path, &buf, mw.FormDataContentType(), nil)
+	_, err = inst.FS.WriteBinary(ctx, path, content, perm)
+	return err
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
 }
