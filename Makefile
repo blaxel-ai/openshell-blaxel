@@ -27,7 +27,7 @@ build:
 ## test: unit tests (driver helpers, tunnel round trip) and script syntax
 test:
 	cd driver && go test ./...
-	for f in gw/*.sh; do sh -n "$$f" || exit 1; done
+	for f in gw/*.sh; do case "$$(head -n1 "$$f")" in *bash*) bash -n "$$f" ;; *) sh -n "$$f" ;; esac || exit 1; done
 
 ## status: gateway/driver health and OpenShell <-> Blaxel sandbox mapping
 status:

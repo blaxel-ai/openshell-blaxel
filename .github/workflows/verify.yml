@@ -50,8 +50,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Parse shell scripts
-        run: for f in gw/*.sh; do sh -n "$f"; done
+      - name: Parse shell scripts (with the shell named in each shebang)
+        run: for f in gw/*.sh; do case "$(head -n1 "$f")" in *bash*) bash -n "$f" ;; *) sh -n "$f" ;; esac || exit 1; done
 
       - name: Check patch whitespace
         if: github.event_name == 'pull_request'
