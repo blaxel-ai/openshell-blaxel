@@ -1,0 +1,23 @@
+# Secrets and local state: gateway PKI, database, logs
+gw/tls/
+gw/*.db
+gw/*.db-*
+*.log
+
+# Tokens captured by experiments (preview tokens)
+experiments/exp3.json
+
+# Build outputs and downloaded binaries
+bin/
+driver/bin/
+experiments/bin/
+experiments/probe/probe-*
+experiments/wsrelay/wsrelay-*
+experiments/grpctest/interop-*
+experiments/protoecho/protoecho
+
+# Node
+node_modules/
+
+.DS_Store
+experiments/wsrelay/wsrelay

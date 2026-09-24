@@ -1,0 +1,42 @@
+id: claude-code-blaxel
+display_name: Claude Code (Blaxel)
+description: Claude Code CLI, with hosts required by Claude Code 2.1+ (platform.claude.com)
+category: agent
+credentials:
+- name: api_key
+  description: Anthropic API key used by Claude Code
+  env_vars:
+  - ANTHROPIC_API_KEY
+  - CLAUDE_API_KEY
+  required: true
+  auth_style: header
+  header_name: x-api-key
+  query_param: ''
+endpoints:
+- host: api.anthropic.com
+  port: 443
+  protocol: rest
+  access: read-write
+  enforcement: enforce
+- host: statsig.anthropic.com
+  port: 443
+  protocol: rest
+  access: read-write
+  enforcement: enforce
+- host: platform.claude.com
+  port: 443
+  protocol: rest
+  access: read-write
+  enforcement: enforce
+- host: sentry.io
+  port: 443
+  protocol: rest
+  access: read-write
+  enforcement: enforce
+binaries:
+- /usr/bin/claude
+- /usr/local/bin/claude
+inference_capable: true
+discovery:
+  credentials:
+  - api_key
