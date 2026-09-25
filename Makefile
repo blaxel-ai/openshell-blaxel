@@ -1,68 +1,75 @@
-# OpenShell on Blaxel. See README.md.
-OPENSHELL_VERSION ?= v0.0.116
+# OpenShell (main) on Blaxel. See README.md.
+#
+# OpenShell main ships as the rolling `dev` pre-release of NVIDIA/OpenShell.
+OPENSHELL_RELEASE ?= dev
 GOBIN_DIR := $(HOME)/go/bin
 MODULE := github.com/blaxel-ai/openshell-blaxel/driver
-PROTO_MAP := Mcompute_driver.proto=$(MODULE)/gen/computev1,Moptions.proto=$(MODULE)/gen/computev1
+PROTO_MAP := Mcompute_driver.proto=$(MODULE)/gen/computev1,Mdatamodel.proto=$(MODULE)/gen/datamodelv1,Mextension.proto=$(MODULE)/gen/extensionv1,Moptions.proto=$(MODULE)/gen/optionsv1,Msandbox.proto=$(MODULE)/gen/sandboxv1
+MAIN_BIN := bin/main
+LINUX := CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 
-.PHONY: all fetch build test proto setup up configure e2e status down clean
+.PHONY: all fetch build test proto deploy connect configure e2e status os destroy clean
 
 all: fetch build
 
-## fetch: download and verify the linux x86_64 openshell-sandbox runtime
-fetch: bin/openshell-sandbox
-bin/openshell-sandbox:
-	mkdir -p bin && cd bin && \
-	gh release download $(OPENSHELL_VERSION) -R NVIDIA/OpenShell --clobber \
-	  -p 'openshell-sandbox-x86_64-unknown-linux-musl.tar.gz' -p 'openshell-sandbox-checksums-sha256.txt' && \
-	grep x86_64-unknown-linux-musl openshell-sandbox-checksums-sha256.txt | shasum -a 256 -c - && \
-	tar xzf openshell-sandbox-x86_64-unknown-linux-musl.tar.gz && \
-	rm -f openshell-sandbox-x86_64-unknown-linux-musl.tar.gz openshell-sandbox-checksums-sha256.txt
+## fetch: OpenShell main binaries (linux gateway/supervisor/sandbox, host CLI), checksum-verified
+fetch: $(MAIN_BIN)/openshell-gateway
+$(MAIN_BIN)/openshell-gateway:
+	mkdir -p $(MAIN_BIN) && cd $(MAIN_BIN) && \
+	host=$$(uname -m | sed 's/arm64/aarch64/')-$$(uname -s | sed 's/Darwin/apple-darwin/;s/Linux/unknown-linux-musl/') && \
+	gh release download $(OPENSHELL_RELEASE) -R NVIDIA/OpenShell --clobber \
+	  -p 'openshell-gateway-x86_64-unknown-linux-gnu.tar.gz' -p 'openshell-supervisor-x86_64-unknown-linux-gnu.tar.gz' \
+	  -p 'openshell-sandbox-x86_64-unknown-linux-musl.tar.gz' -p "openshell-$$host.tar.gz" -p '*checksums-sha256.txt' && \
+	cat *checksums-sha256.txt | grep -E "(gateway|supervisor)-x86_64-unknown-linux-gnu|sandbox-x86_64-unknown-linux-musl|openshell-$$host.tar.gz" | shasum -a 256 -c - && \
+	for f in *.tar.gz; do tar xzf "$$f"; done && rm -f *.tar.gz *checksums-sha256.txt && ./openshell --version
 
-## build: driver (host) and os-tunnel (linux, uploaded into each sandbox)
+## build: driver + os-tunnel for the control/workload sandboxes (linux), os-tunnel + os-deploy for the laptop
 build:
 	cd driver && go vet ./... && \
-	go build -o bin/openshell-driver-blaxel ./cmd/openshell-driver-blaxel && \
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/os-tunnel-linux-amd64 ./cmd/os-tunnel
+	$(LINUX) go build -o bin/openshell-driver-blaxel-linux-amd64 ./cmd/openshell-driver-blaxel && \
+	$(LINUX) go build -o bin/os-tunnel-linux-amd64 ./cmd/os-tunnel && \
+	go build -o bin/os-tunnel ./cmd/os-tunnel && \
+	go build -o bin/os-deploy ./cmd/os-deploy
 
-## test: unit tests (driver helpers, tunnel round trip) and script syntax
+## test: unit tests and script syntax (no network)
 test:
 	cd driver && go test ./...
-	for f in gw/*.sh; do case "$$(head -n1 "$$f")" in *bash*) bash -n "$$f" ;; *) sh -n "$$f" ;; esac || exit 1; done
+	for f in gw/*.sh experiments/*.sh; do case "$$(head -n1 "$$f")" in *bash*) bash -n "$$f" ;; *) sh -n "$$f" ;; esac || exit 1; done
 
-## status: gateway/driver health and OpenShell <-> Blaxel sandbox mapping
-status:
-	./gw/status.sh
-
-## proto: regenerate Go stubs from driver/proto (OpenShell v0.0.116 contract)
+## proto: regenerate Go stubs from driver/proto (OpenShell main compute-driver contract)
 proto:
-	cd driver && PATH=$(GOBIN_DIR):$$PATH protoc -I proto \
-	  --go_out=gen/computev1 --go_opt=paths=source_relative,$(PROTO_MAP) \
-	  --go-grpc_out=gen/computev1 --go-grpc_opt=paths=source_relative,$(PROTO_MAP) \
-	  proto/compute_driver.proto proto/options.proto
+	cd driver && PATH=$(GOBIN_DIR):$$PATH protoc -I proto --go_out=. --go-grpc_out=. \
+	  --go_opt=module=$(MODULE),$(PROTO_MAP) --go-grpc_opt=module=$(MODULE),$(PROTO_MAP) proto/*.proto
 
-## setup: gateway PKI + CLI registration (once)
-setup:
-	./gw/setup.sh
+## deploy: create/update the control sandbox (gateway, driver, supervisors, CLAT, DoH)
+deploy: all
+	. ./gw/env.sh && driver/bin/os-deploy up -name $$CONTROL_SANDBOX -owner $$GATEWAY_NAME -workspace $$BL_WORKSPACE -env $$BL_ENV -region $$BL_REGION -bin $(MAIN_BIN) -driver driver/bin -config $$(dirname $$CLIENT_BUNDLE)
 
-## up: (re)start driver + gateway, then apply gateway settings
-up: all
-	./gw/restart.sh
-	$(MAKE) configure
+## connect: laptop tunnel + CLI gateway registration
+connect:
+	./gw/connect.sh
 
-## configure: provider profile composition + Claude Code profile
+## configure: import the Claude Code provider profile
 configure:
-	. ./gw/env.sh && openshell -g $$GATEWAY_NAME settings set --global --key providers_v2_enabled --value true --yes
-	. ./gw/env.sh && if openshell -g $$GATEWAY_NAME provider profile export claude-code-blaxel >/dev/null 2>&1; then \
-	  echo "provider profile claude-code-blaxel already present"; \
-	else openshell -g $$GATEWAY_NAME provider profile import --file gw/claude-code-blaxel.yaml; fi
+	. ./gw/env.sh && (oscli provider profile export claude-code-blaxel >/dev/null && echo "profile claude-code-blaxel present") || \
+	  oscli provider profile import --file gw/claude-code-blaxel.yaml
 
-## e2e: end-to-end test against real Blaxel sandboxes (~3 min)
+## e2e: end-to-end test against real Blaxel sandboxes (~4 min)
 e2e:
 	./gw/e2e.sh
 
-## down: stop driver + gateway (Blaxel sandboxes keep running)
-down:
-	-. ./gw/env.sh && pkill -f "openshell-gateway --name $$GATEWAY_NAME " ; pkill -f "openshell-driver-blaxel -socket $$DRIVER_SOCKET "
+## status: control plane, gateway, OpenShell <-> Blaxel sandbox mapping
+status:
+	./gw/status.sh
+
+## os: run the OpenShell main CLI against this control plane, e.g. make os ARGS='sandbox list'
+os:
+	@. ./gw/env.sh && "$$OS_BIN" -g "$$GATEWAY_NAME" $(ARGS)
+
+## destroy: delete the control sandbox (delete workload sandboxes through OpenShell first)
+destroy:
+	. ./gw/env.sh && driver/bin/os-deploy down -name $$CONTROL_SANDBOX -workspace $$BL_WORKSPACE -env $$BL_ENV
+	-pkill -f "os-tunnel dial -sandbox"
 
 clean:
 	rm -rf bin driver/bin

@@ -36,12 +36,14 @@ jobs:
         working-directory: driver
         run: go test -race ./...
 
-      - name: Build driver (linux, darwin) and os-tunnel (linux)
+      - name: Build driver and os-tunnel (linux), os-tunnel and os-deploy (linux, darwin)
         working-directory: driver
         run: |
-          GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/openshell-driver-blaxel
-          GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/openshell-driver-blaxel
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/os-tunnel
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/openshell-driver-blaxel
+          for os in linux darwin; do
+            CGO_ENABLED=0 GOOS=$os GOARCH=amd64 go build -o /dev/null ./cmd/os-tunnel
+            CGO_ENABLED=0 GOOS=$os GOARCH=amd64 go build -o /dev/null ./cmd/os-deploy
+          done
 
   scripts:
     name: Script syntax
@@ -53,7 +55,7 @@ jobs:
           fetch-depth: 0
 
       - name: Parse shell scripts (with the shell named in each shebang)
-        run: for f in gw/*.sh; do case "$(head -n1 "$f")" in *bash*) bash -n "$f" ;; *) sh -n "$f" ;; esac || exit 1; done
+        run: for f in gw/*.sh experiments/*.sh; do case "$(head -n1 "$f")" in *bash*) bash -n "$f" ;; *) sh -n "$f" ;; esac || exit 1; done
 
       - name: Check patch whitespace
         if: github.event_name == 'pull_request'

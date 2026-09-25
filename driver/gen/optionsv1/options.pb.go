@@ -7,7 +7,7 @@
 // 	protoc        v7.36.2
 // source: options.proto
 
-package computev1
+package optionsv1
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"

@@ -301,6 +301,16 @@ func (c *Client) WriteFile(ctx context.Context, sandbox, path string, content []
 	return err
 }
 
+// ReadFile downloads a file from the sandbox.
+func (c *Client) ReadFile(ctx context.Context, sandbox, path string) ([]byte, error) {
+	inst, err := c.instance(ctx, sandbox)
+	if err != nil {
+		return nil, err
+	}
+	b, err := inst.FS.ReadBinary(ctx, path)
+	return b, notFound(err)
+}
+
 func truncate(s string, n int) string {
 	if len(s) > n {
 		return s[:n] + "…"

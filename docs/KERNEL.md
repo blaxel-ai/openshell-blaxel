@@ -12,6 +12,9 @@ makes it mandatory, so the Blaxel guest kernel must provide it.
 The driver sets this by default (`-kernel-variant landlock`). The variant is
 fixed at sandbox creation.
 
+The control sandbox doesn't run agents and uses `{"tun": "enabled", "iptables": "enabled"}`
+instead, for the CLAT (`os-deploy` sets it).
+
 ## Required kernel config
 
 ```

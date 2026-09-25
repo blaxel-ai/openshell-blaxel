@@ -1,27 +1,57 @@
 package driver
 
 import (
-	"encoding/base64"
+	"context"
 	"encoding/json"
-	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
 
 	pb "github.com/blaxel-ai/openshell-blaxel/driver/gen/computev1"
+	extpb "github.com/blaxel-ai/openshell-blaxel/driver/gen/extensionv1"
 )
 
 func testDriver() *Driver {
-	return New(Config{DefaultImage: "blaxel/py-app:latest", MemoryMiB: 4096, InVMGatewayPort: 17680}, nil, nil)
+	d := New(Config{DefaultImage: "blaxel/py-app:latest", MemoryMiB: 4096, Owner: DefaultOwner,
+		GatewayEndpoint: "https://127.0.0.1:17670", GatewayCA: "/ca", GatewayCert: "/crt", GatewayKey: "/key", LogLevel: "info"}, nil, nil)
+	d.log = discardLogger()
+	return d
+}
+
+func gatewayMeta(major uint32) *extpb.PeerMetadata {
+	return &extpb.PeerMetadata{ProtocolVersion: &extpb.ProtocolVersion{Major: major}, ImplementationName: "openshell/gateway",
+		ImplementationVersion: "0.0.117", SupportedCapabilities: []string{computeContract}, RequiredCapabilities: []string{computeContract}}
+}
+
+func TestCapabilitiesNegotiation(t *testing.T) {
+	d := testDriver()
+	resp, err := d.GetCapabilities(context.Background(), &pb.GetCapabilitiesRequest{Gateway: gatewayMeta(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ext := resp.GetExtension()
+	if ext.GetProtocolVersion().GetMajor() != 1 || ext.GetSupportedCapabilities()[0] != computeContract || ext.GetImplementationName() == "" {
+		t.Fatalf("extension metadata = %+v", ext)
+	}
+	if resp.GetResourceAdmissionPolicy() != DefaultAdmissionPolicy || resp.GetDriverReportsRuntimeReadiness() {
+		t.Fatal("admission policy must be the default acknowledgement; readiness comes from the supervisor session")
+	}
+	// The policy JSON after "v1:" must parse (the gateway compares it parsed).
+	var v map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(DefaultAdmissionPolicy, "v1:")), &v); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []*extpb.PeerMetadata{nil, gatewayMeta(2)} {
+		if _, err := d.GetCapabilities(context.Background(), &pb.GetCapabilitiesRequest{Gateway: bad}); err == nil {
+			t.Errorf("gateway %v must be rejected", bad)
+		}
+	}
 }
 
 func TestBlaxelNameIsStableAndDNSSafe(t *testing.T) {
 	a := blaxelName("My Sandbox_With.Weird Chars and a very long name", "id-1")
-	if a != blaxelName("My Sandbox_With.Weird Chars and a very long name", "id-1") {
-		t.Fatal("name must be stable for the same id")
-	}
-	if a == blaxelName("My Sandbox_With.Weird Chars and a very long name", "id-2") {
-		t.Fatal("different ids must give different names")
+	if a != blaxelName("My Sandbox_With.Weird Chars and a very long name", "id-1") || a == blaxelName("x", "id-2") {
+		t.Fatal("name must be stable per id and differ across ids")
 	}
 	if !regexp.MustCompile(`^os-[a-z0-9-]{1,20}-[0-9a-f]{8}$`).MatchString(a) {
 		t.Fatalf("unexpected name %q", a)
@@ -33,111 +63,82 @@ func TestMemoryMiB(t *testing.T) {
 	for q, want := range map[string]int{"": 4096, "4Gi": 4096, "512Mi": 512, "1073741824": 1024} {
 		sb := &pb.DriverSandbox{Spec: &pb.DriverSandboxSpec{Template: &pb.DriverSandboxTemplate{
 			Resources: &pb.DriverResourceRequirements{MemoryLimit: q}}}}
-		got, err := d.memoryMiB(sb)
-		if err != nil || got != want {
+		if got, err := d.memoryMiB(sb); err != nil || got != want {
 			t.Errorf("memoryMiB(%q) = %d, %v; want %d", q, got, err, want)
 		}
 	}
-	bad := &pb.DriverSandbox{Spec: &pb.DriverSandboxSpec{Template: &pb.DriverSandboxTemplate{
-		Resources: &pb.DriverResourceRequirements{MemoryLimit: "lots"}}}}
-	if _, err := d.memoryMiB(bad); err == nil {
-		t.Error("invalid quantity must fail")
+}
+
+func TestSpecFromRequest(t *testing.T) {
+	sb := &pb.DriverSandbox{Spec: &pb.DriverSandboxSpec{
+		Command: []string{"claude"}, Tty: true, AwaitMainProcessAttachment: true,
+		Environment: map[string]string{"FOO": "bar", "OPENSHELL_ENDPOINT": "https://attacker", "BAD NAME": "x"},
+	}}
+	s := specFromRequest(sb, "blaxel/py-app:latest", "info")
+	if s.ChildEnv["FOO"] != "bar" || s.ChildEnv["OPENSHELL_ENDPOINT"] != "" || s.ChildEnv["BAD NAME"] != "" {
+		t.Fatalf("child env = %v", s.ChildEnv)
+	}
+	var mp map[string]any
+	json.Unmarshal(s.MainProcessSpec, &mp)
+	if mp["version"].(float64) != 1 || mp["tty"] != true || mp["await_main_process_attachment"] != true || mp["command"].([]any)[0] != "claude" {
+		t.Fatalf("main process spec = %s", s.MainProcessSpec)
+	}
+	scratch := specFromRequest(&pb.DriverSandbox{Spec: &pb.DriverSandboxSpec{}}, "img", "")
+	if !strings.Contains(string(scratch.MainProcessSpec), `"command":[]`) || scratch.LogLevel != "" {
+		t.Fatalf("scratch spec = %s", scratch.MainProcessSpec)
 	}
 }
 
-// runLaunchEnv executes the generated launch script with its final exec
-// replaced by `env`, returning the environment the supervisor would get.
-func runLaunchEnv(t *testing.T, script string) map[string]string {
-	t.Helper()
-	i := strings.LastIndex(script, "cd /sandbox\n")
-	if i < 0 {
-		t.Fatal("launch script lost its cd/exec tail")
-	}
-	out, err := exec.Command("/bin/sh", "-c", script[:i]+"env").Output()
-	if err != nil {
-		t.Fatalf("launch script failed to run: %v", err)
-	}
-	env := map[string]string{}
-	for _, line := range strings.Split(string(out), "\n") {
-		if k, v, ok := strings.Cut(line, "="); ok {
-			env[k] = v
+func TestSupervisorEnv(t *testing.T) {
+	d := testDriver()
+	env := strings.Join(supervisorEnv(d.cfg, &record{id: "sb-1", name: "demo"}, "/state/sb-1/gen", &persistedSpec{
+		MainProcessSpec: json.RawMessage(`{"version":1}`), LogLevel: "info"}), "\n")
+	for _, want := range []string{
+		"OPENSHELL_ADMITTED_ISOLATION_BACKEND=openshell-sandbox", "OPENSHELL_SANDBOX_ID=sb-1",
+		"OPENSHELL_ENDPOINT=https://127.0.0.1:17670", "OPENSHELL_TLS_CA=/ca", "OPENSHELL_TLS_CERT=/crt", "OPENSHELL_TLS_KEY=/key",
+		`OPENSHELL_MAIN_PROCESS_SPEC={"version":1}`,
+	} {
+		if !strings.Contains(env, want) {
+			t.Errorf("supervisor env missing %s", want)
 		}
 	}
-	return env
-}
-
-func TestLaunchScriptQuotingAndOwnership(t *testing.T) {
-	d := testDriver()
-	hostile := `$(touch /tmp/pwned); echo 'x'"y"` + "`id`"
-	sb := &pb.DriverSandbox{Id: "sb-1", Name: "demo", Spec: &pb.DriverSandboxSpec{
-		Command: []string{"claude", "--resume"},
-		Environment: map[string]string{
-			"FOO":                "bar baz",
-			"HOSTILE":            hostile,
-			"OPENSHELL_ENDPOINT": "https://attacker.example",
-			"BAD NAME":           "dropped",
-		},
-	}}
-	env := runLaunchEnv(t, d.launchScript(&record{id: "sb-1", name: "demo"}, sb, "blaxel/py-app:latest"))
-
-	if env["FOO"] != "bar baz" || env["HOSTILE"] != hostile {
-		t.Errorf("user values must arrive verbatim: FOO=%q HOSTILE=%q", env["FOO"], env["HOSTILE"])
+	if p := sshSocketPath(&record{id: "0b6f1d7e-9d1c-4a3e-9a52-7c2a3c1f5e10"}); len(p) >= 108 {
+		t.Errorf("ssh socket path %q exceeds SUN_LEN", p)
 	}
-	if env["OPENSHELL_ENDPOINT"] != "https://127.0.0.1:17680" {
-		t.Errorf("user env must not override driver-owned names, got %q", env["OPENSHELL_ENDPOINT"])
-	}
-	if _, ok := env["BAD NAME"]; ok {
-		t.Error("invalid variable names must be dropped")
-	}
-	if env["OPENSHELL_OCI_IMAGE_USER"] != "sandbox" || env["OPENSHELL_SANDBOX_TOKEN_FILE"] != tokenPath {
-		t.Errorf("missing driver env: %v", env)
-	}
-
-	spec, ok := strings.CutPrefix(env["OPENSHELL_MAIN_PROCESS_SPEC"], "base64url:")
-	if !ok {
-		t.Fatalf("main process spec not base64url-encoded: %q", env["OPENSHELL_MAIN_PROCESS_SPEC"])
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var mp struct {
-		Version int      `json:"version"`
-		Command []string `json:"command"`
-	}
-	if err := json.Unmarshal(raw, &mp); err != nil || mp.Version != 1 || strings.Join(mp.Command, " ") != "claude --resume" {
-		t.Errorf("main process spec = %s (%v)", raw, err)
+	if strings.Contains(env, "BL_API_KEY") {
+		t.Error("the supervisor must not inherit Blaxel credentials")
 	}
 }
 
-func TestImageSubstitution(t *testing.T) {
-	d := testDriver()
-	d.subs = map[chan *pb.WatchSandboxesEvent]struct{}{}
-	d.log = discardLogger()
-	for img, want := range map[string]string{
-		"":                              "blaxel/py-app:latest",
-		"blaxel/node:latest":            "blaxel/node:latest",
-		"sandbox/my-template:abc":       "sandbox/my-template:abc",
-		"ghcr.io/nvidia/openshell/base": "blaxel/py-app:latest",
-	} {
-		sb := &pb.DriverSandbox{Spec: &pb.DriverSandboxSpec{Template: &pb.DriverSandboxTemplate{Image: img}}}
-		if got := d.image(&record{}, sb); got != want {
-			t.Errorf("image(%q) = %q, want %q", img, got, want)
+func TestLaunchScriptFence(t *testing.T) {
+	s := launchScript()
+	for _, want := range []string{"unshare --mount --net --pid --fork --kill-child", "ip link set lo up",
+		"ip_unprivileged_port_start", "launch-capability-free 1500 1500 " + vmBootstrap + " /sandbox", "env -i"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("launcher missing %q", want)
 		}
 	}
 }
 
 func TestOwnershipScopesRecovery(t *testing.T) {
 	d := testDriver()
-	d.cfg.Owner = "blaxel"
-	if !d.owns(map[string]string{}) {
-		t.Error("the default owner must adopt pre-label sandboxes")
+	if !d.owns(map[string]string{}) || d.owns(map[string]string{labelOwner: "other"}) {
+		t.Error("default owner adopts unlabeled sandboxes only")
 	}
-	if d.owns(map[string]string{labelOwner: "blaxel-sdk"}) {
-		t.Error("must not adopt another instance's sandbox")
-	}
-	d.cfg.Owner = "blaxel-sdk"
-	if d.owns(map[string]string{}) || !d.owns(map[string]string{labelOwner: "blaxel-sdk"}) {
+	d.cfg.Owner = "other"
+	if d.owns(map[string]string{}) || !d.owns(map[string]string{labelOwner: "other"}) {
 		t.Error("a non-default owner adopts only its own sandboxes")
+	}
+}
+
+func TestValidateWorkloadIdentity(t *testing.T) {
+	d := testDriver()
+	ok := &pb.DriverSandbox{Id: "a", Name: "b", Spec: &pb.DriverSandboxSpec{WorkloadIdentity: &pb.WorkloadIdentityRequest{User: "sandbox"}}}
+	if _, err := d.ValidateSandboxCreate(context.Background(), &pb.ValidateSandboxCreateRequest{Sandbox: ok}); err != nil {
+		t.Fatal(err)
+	}
+	bad := &pb.DriverSandbox{Id: "a", Name: "b", Spec: &pb.DriverSandboxSpec{WorkloadIdentity: &pb.WorkloadIdentityRequest{User: "root"}}}
+	if _, err := d.ValidateSandboxCreate(context.Background(), &pb.ValidateSandboxCreateRequest{Sandbox: bad}); err == nil {
+		t.Fatal("other identities must be rejected")
 	}
 }

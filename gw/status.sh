@@ -1,16 +1,16 @@
 #!/bin/sh
-# Read-only status: gateway and driver health, OpenShell sandboxes joined with
-# their Blaxel sandboxes, and orphans on either side.
+# Read-only status: control-plane processes, gateway health, and OpenShell
+# sandboxes joined with their Blaxel workload sandboxes (orphans flagged).
 . "$(dirname "$0")/env.sh"
 
-echo "== gateway '$GATEWAY_NAME' (127.0.0.1:$GATEWAY_PORT)"
-openshell -g "$GATEWAY_NAME" status 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' | grep -E 'Status:|Authentication:|Version:|Error' | sed 's/^ */  /'
-printf '  driver process: '; pgrep -f "openshell-driver-blaxel -socket $DRIVER_SOCKET " >/dev/null && echo running || echo "NOT RUNNING"
-printf '  driver socket:  '; [ -S "$DRIVER_SOCKET" ] && echo "$DRIVER_SOCKET" || echo "MISSING ($DRIVER_SOCKET)"
-printf '  providers_v2:   '; openshell -g "$GATEWAY_NAME" settings get --global 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | grep -q 'providers_v2_enabled.*true' && echo enabled || echo "disabled (run: make configure)"
+"$ROOT/driver/bin/os-deploy" status -name "$CONTROL_SANDBOX" -workspace "$BL_WORKSPACE" -env "$BL_ENV" 2>&1
+echo "== gateway '$GATEWAY_NAME' via 127.0.0.1:$LOCAL_PORT"
+printf '  laptop tunnel: '
+pgrep -f "os-tunnel dial -sandbox $CONTROL_SANDBOX -listen 127.0.0.1:$LOCAL_PORT" >/dev/null && echo running || echo "NOT RUNNING (make connect)"
+oscli status | grep -E 'Status:|Authentication:|Version:|Error' | sed 's/^ */  /'
 
 echo "== sandboxes (workspace $BL_WORKSPACE, $BL_ENV)"
-OS_LIST=$(openshell -g "$GATEWAY_NAME" sandbox list 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g')
+OS_LIST=$(oscli sandbox list)
 BL_JSON=$(bl get sandboxes -w "$BL_WORKSPACE" -o json 2>/dev/null)
 OS_LIST="$OS_LIST" BL_JSON="$BL_JSON" python3 - <<'EOF'
 import json, os
@@ -23,26 +23,22 @@ try:
     blx = json.loads(os.environ["BL_JSON"] or "[]")
 except json.JSONDecodeError:
     blx = []
+owner = os.environ["GATEWAY_NAME"]
 managed = {}
 for s in blx:
-    labels = s.get("metadata", {}).get("labels") or {}
-    l = labels
-    if labels.get("openshell.ai/managed-by") == "openshell-driver-blaxel" and l.get("openshell.ai/driver-owner", "blaxel") == os.environ["GATEWAY_NAME"]:
-        managed[labels.get("openshell.ai/sandbox-name", "?")] = (
+    l = s.get("metadata", {}).get("labels") or {}
+    if l.get("openshell.ai/managed-by") == "openshell-driver-blaxel" and l.get("openshell.ai/driver-owner", "blaxel") == owner:
+        managed[l.get("openshell.ai/sandbox-name", "?")] = (
             s["metadata"]["name"], s.get("status", "?"),
-            (s.get("spec", {}).get("runtime", {}).get("extraArgs") or {}))
+            ",".join(k for k, v in (s.get("spec", {}).get("runtime", {}).get("extraArgs") or {}).items() if v == "enabled") or "default")
 rows = sorted(set(phases) | set(managed))
 if not rows:
     print("  none")
-fmt = "  {:<20} {:<13} {:<40} {:<11} {}"
+    raise SystemExit
+fmt = "  {:<22} {:<13} {:<36} {:<11} {}"
 print(fmt.format("OPENSHELL", "PHASE", "BLAXEL SANDBOX", "STATUS", "KERNEL"))
 for n in rows:
-    bname, bstatus, extra = managed.get(n, ("-", "-", {}))
-    kernel = ",".join(k for k, v in extra.items() if v == "enabled") or ("default" if n in managed else "-")
-    note = ""
-    if n in phases and n not in managed:
-        note = "  <- no Blaxel sandbox"
-    elif n not in phases:
-        note = "  <- orphan (not in gateway)"
-    print(fmt.format(n, phases.get(n, "-"), bname, bstatus, kernel) + note)
+    b, st, k = managed.get(n, ("-", "-", "-"))
+    note = "  <- no Blaxel sandbox" if n in phases and n not in managed else ("  <- orphan (not in gateway)" if n not in phases else "")
+    print(fmt.format(n, phases.get(n, "-"), b, st, k) + note)
 EOF

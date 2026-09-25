@@ -4,77 +4,107 @@ Orientation for an AI coding agent, or a human, working in this repo. Read this 
 
 ## What this is
 
-An external OpenShell (v0.0.116) compute driver that runs each OpenShell sandbox as a Blaxel microVM. The OpenShell gateway runs locally, and each sandbox reaches it through a reverse tunnel dialed by the driver.
+OpenShell **main** (RFC 0012 isolation contract) running entirely on Blaxel.
+- A control sandbox (`os-control`) runs:
+  - the OpenShell gateway;
+  - this repo's compute driver;
+  - one `openshell-supervisor` per agent;
+  - a CLAT and a DoH forwarder.
+- Each agent runs in its own Blaxel workload sandbox under `openshell-sandbox launch-capability-free`, in a network namespace that only has loopback.
+- The laptop runs the `openshell` CLI and one WebSocket tunnel.
 
-- `driver/`: Go. `cmd/openshell-driver-blaxel` (gRPC `ComputeDriver` on a Unix socket), `cmd/os-tunnel` (uploaded into each VM), `internal/blaxel` (adapter over the Blaxel Go SDK `sdk-go`, the SDK used by `bl` in blaxel-ai/toolkit), `internal/tunnel` (yamux over WebSocket), `internal/driver` (lifecycle), `gen/computev1` (generated from `proto/`).
-- `gw/`: local gateway operation. `env.sh` (settings), `setup.sh`, `restart.sh`, `status.sh`, `cleanup.sh`, `e2e.sh`, `claude-code-blaxel.yaml`.
-- `experiments/`: feasibility probes and their scripts. They aren't part of the product.
+- `driver/`: Go.
+  - `cmd/openshell-driver-blaxel`: gRPC `ComputeDriver` on a Unix socket.
+  - `cmd/os-tunnel`:
+    - `serve`: in workloads;
+    - `dial`: on the laptop;
+    - `dns`: the DoH forwarder in the control sandbox.
+  - `cmd/os-deploy`: creates and updates the control sandbox.
+  - `internal/boundary`: main's wire formats and per-session TLS.
+  - `internal/driver`: lifecycle.
+  - `internal/blaxel`: adapter over the Blaxel Go SDK `sdk-go`, the SDK used by `bl` in blaxel-ai/toolkit.
+  - `internal/tunnel`: yamux over WebSocket.
+  - `internal/doh`.
+  - `gen/`: generated from `proto/`.
+- `gw/`: laptop operation.
+  - `env.sh`: settings.
+  - `connect.sh`, `status.sh`, `cleanup.sh`, `e2e.sh`.
+  - `claude-code-blaxel.yaml`.
+- `experiments/`: feasibility probes. They aren't part of the product.
 
 Public quickstart: `README.md`. Design and operations: `GUIDE.md`. Machine summary: `llms.txt`.
 
 ## Prerequisites
 
-- Go 1.25+, `gh`, `bl` logged in (`bl login <workspace>`), OpenShell v0.0.116 CLI and gateway (`brew install nvidia/openshell/openshell`).
-- `cp .env.example .env` and set the workspace, env and region. The region must support the `landlock` kernel variant.
+- Go 1.25+, `gh`, `bl` logged in (`bl login <workspace>`).
+- `cp .env.example .env`, then set the workspace, env, region and `BL_API_KEY` (service account). The region must support the `landlock`, `tun` and `iptables` kernel variants.
 
 ## Setup, in order
 
-1. `make test`: local unit tests and script syntax.
-2. `make setup`: generates `gw/tls/` and registers CLI gateway `blaxel` (local only).
-3. `make up`: fetches `bin/openshell-sandbox`, builds, starts the driver and gateway, runs `make configure`.
-4. `make status`: expect `Authenticated`, driver running, `providers_v2: enabled`.
-5. `make e2e`: creates and deletes one Blaxel sandbox, 22 checks.
+1. `make test`: unit tests and script syntax, local.
+2. `make deploy`:
+   - fetches OpenShell main (`dev` release) and builds;
+   - creates or updates `os-control`;
+   - fetches the CLI bundle to `~/.openshell-blaxel/mtls`.
+3. `make connect`: laptop tunnel on `127.0.0.1:17690` and CLI gateway `blaxel-main`.
+4. `make status`: expect every control process `running`, `Connected`, `Authenticated`.
+5. `make e2e`: creates and deletes one workload sandbox, 20 checks.
 
 ## Commands
 
 | Command | What it does | Side effects |
 | -- | -- | -- |
-| `make test` | `go test ./...` and `sh -n gw/*.sh` | local, safe |
-| `make build` | builds the driver and linux `os-tunnel` | local, safe |
-| `make fetch` | downloads and checksum-verifies `openshell-sandbox` v0.0.116 | network read, local file |
-| `make setup` | gateway PKI + CLI registration | writes `gw/tls/` and `~/.config/openshell/gateways/blaxel` |
-| `make up` / `./gw/restart.sh` | (re)starts this instance's driver + gateway | **drops every open session on this instance**; workloads survive |
-| `make configure` | enables `providers_v2_enabled`, imports the Claude profile | mutates gateway settings |
-| `make status` | health and sandbox mapping | read-only Blaxel and gateway calls |
+| `make test` | `go test ./...` and `sh -n` on scripts | local, safe |
+| `make build` | driver + `os-tunnel` (linux), `os-tunnel` + `os-deploy` (host) | local, safe |
+| `make fetch` | downloads and checksum-verifies OpenShell main binaries | network read, local files |
+| `make deploy` | creates or updates the control sandbox | **creates a Blaxel sandbox; a redeploy restarts gateway, driver and supervisors, dropping sessions** |
+| `make connect` | laptop tunnel + CLI registration | writes `~/.openshell-blaxel/cli-config` |
+| `make configure` | imports the Claude Code provider profile | mutates the gateway |
+| `make status` | health and sandbox mapping | read-only |
 | `make e2e` | full end-to-end run | **creates and deletes a Blaxel sandbox** |
+| `make os ARGS='sandbox create …'` | new sandbox | **creates a Blaxel sandbox** |
 | `./gw/cleanup.sh <n>` / `--orphans` | prints an exact plan | read-only |
 | `./gw/cleanup.sh … --apply` | deletes the named sandboxes or orphan VMs | **deletes Blaxel sandboxes** |
-| `openshell -g blaxel sandbox create …` | new sandbox | **creates a Blaxel sandbox** |
-| `node experiments/*.mjs` | experiments | **most create and delete Blaxel sandboxes** |
+| `make destroy` | deletes the control sandbox | **destroys the gateway and its state** |
+| `node experiments/*.mjs`, `experiments/*.sh` | experiments | **most create and delete Blaxel sandboxes** |
 | `make proto` | regenerates `driver/gen` | local, needs `protoc` + Go plugins |
 
 ## Where to look
 
 | Path | Responsibility |
 | -- | -- |
-| `driver/internal/driver/driver.go` | RPCs, provisioning, bootstrap script, launch env, monitor, recovery |
-| `driver/internal/blaxel/client.go` | Blaxel operations through `github.com/blaxel-ai/sdk-go` v0.27.2: sandboxes, processes, files, auth headers. Don't hand-roll HTTP; extend the adapter |
-| `driver/internal/tunnel/tunnel.go` | reverse tunnel both halves, keepalive, reconnect |
-| `driver/proto/` | OpenShell v0.0.116 protos (Apache-2.0, NVIDIA), copied verbatim |
+| `driver/internal/driver/driver.go` | RPCs, capability negotiation, admission ack, recovery |
+| `driver/internal/driver/launch.go` | provisioning, VM bootstrap, fence launcher, supervisor spawn, watch, teardown |
+| `driver/internal/boundary/` | `BoundaryConfig`, runtime descriptor, outer fence, workload identity, TLS material. `fixture/` runs them against the real binaries |
+| `driver/internal/blaxel/client.go` | Blaxel operations through `github.com/blaxel-ai/sdk-go` v0.27.2. Don't hand-roll HTTP; extend the adapter |
+| `driver/internal/tunnel/tunnel.go` | `Serve` (workload side), `Listen`/`Endpoint.Run` (control and laptop side) |
+| `driver/cmd/os-deploy/main.go` | control sandbox: kernel variants, uploads, `gateway.toml`, CLAT script, process set |
+| `driver/proto/` | OpenShell main protos (Apache-2.0, NVIDIA) at `08548713c`, copied verbatim |
 | `gw/e2e.sh` | the acceptance test; add checks here for behavior changes |
 | `docs/KERNEL.md` | kernel requirements and qualification |
-| `docs/ROADMAP.md` | the OpenShell `main` port |
 
 ## Invariants
 
-- Use the Blaxel Go SDK (`sdk-go`, as in blaxel-ai/toolkit) for every Blaxel call. The only non-SDK request is the tunnel WebSocket, which takes its auth from `Credentials.AuthHeaders`.
+- Use the Blaxel Go SDK for every Blaxel call. The only non-SDK requests are the tunnel WebSockets, which take their auth from the adapter's `Headers()`.
 - Start long-lived Blaxel processes with `keepAlive: true` **and** `timeout: 0` (`blaxel.Forever`). The zero must reach the wire (`client_test.go` checks it). Without it they die at 600 s.
-- Every sandbox carries `openshell.ai/driver-owner`. Recovery, `status` and `cleanup` must filter on it. Unlabeled sandboxes belong to `blaxel`. Never start a second driver with the same owner: it takes over the other instance's tunnels.
-- The Blaxel filesystem API ignores the multipart `permissions` field, so set modes in the bootstrap script.
-- In Blaxel's process API `HOME` is `/blaxel`. Pin `HOME` when installers depend on it (see `claudeSetup`).
-- Readiness is `/run/openshell/ssh.sock` existing, the same signal as the Podman driver.
-- Recovery (`reattach`) must not restart `openshell-sandbox`. Only `Create`/`Start` do.
-- Never let user environment override `OPENSHELL_*`. Keep `shellQuote` on every value in `launch.sh`.
-- The kernel variant (`extraArgs`) is immutable after creation.
-- The v0.0.116 gateway doesn't reconnect to a restarted driver. Restart both (`gw/restart.sh`).
-- A process that exits cleanly must not delete a socket path a newer driver has bound (`os.SameFile` check in `main.go`).
-- `openshell gateway add --local` overwrites that gateway's `mtls/` with the Homebrew certs. `gw/setup.sh` installs ours afterwards.
-- `openshell policy set` on a live sandbox can't remove filesystem paths. Start from `policy get <n> --base`.
+- Every sandbox carries `openshell.ai/driver-owner=<GATEWAY_NAME>`. Recovery, `status` and `cleanup` filter on it. Unlabeled sandboxes belong to `blaxel`, the v0.0.116 local gateway. A wrong `GATEWAY_NAME` makes other people's sandboxes look like orphans.
+- `BoundaryConfig` and the runtime descriptor are `deny_unknown_fields` on the Rust side. Change them only together with `boundary_test.go`, and re-run `fixture/` against the real binaries.
+- The supervisor auth bundle is written verbatim. No JWT goes into the workload VM.
+- The gateway owns readiness (`driver_reports_runtime_readiness=false`). A sandbox pins its first supervisor, so Start must relaunch both sides.
+- Unix socket paths must fit `SUN_LEN` (108): SSH sockets are `/run/openshell-blaxel/<hash>/ssh.sock`.
+- The admission acknowledgement must match the gateway's default string byte for byte (`DefaultAdmissionPolicy`).
+- Never let user environment override `OPENSHELL_*`.
+- Kernel variants (`extraArgs`) are immutable after creation.
+- The gateway runs with `BL_API_KEY` unset. Only the driver reads `driver.env`.
+- `policy get --base` on main prints no trailing newline. Add one before appending YAML.
 - The command after `--` in `sandbox create` is the sandbox's lifetime.
 
 ## Safe vs. company-facing
 
 - Local edits, `make test`, `make build` and plan-only cleanup are allowed.
-- Before anything that creates or deletes Blaxel sandboxes (`make e2e`, `sandbox create`, experiments, `cleanup --apply`), restarts the driver or gateway (`make up`, `gw/restart.sh`: it drops users' open sessions), or changes gateway settings, get explicit human approval and name the side effect.
-- Never commit `gw/tls/`, `gw/*.db`, logs, `.env` or `experiments/exp3.json` (preview tokens). `.gitignore` covers them. Check before staging.
-- Do not push, open PRs, change repo visibility, file upstream issues (NVIDIA/OpenShell) or post publicly without explicit human approval.
+- Get explicit human approval, naming the side effect, before anything that:
+  - creates or deletes Blaxel sandboxes (`make deploy`, `make e2e`, `sandbox create`, experiments, `cleanup --apply`, `make destroy`);
+  - restarts the control plane (a redeploy drops open sessions);
+  - changes gateway settings.
+- Never commit `.env`, `gw/tls/`, `*.db`, logs or `experiments/exp3.json` (preview tokens). `.gitignore` covers them. Check before staging.
+- Don't push, open PRs, change repo visibility, file upstream issues (NVIDIA/OpenShell) or post publicly without explicit human approval.

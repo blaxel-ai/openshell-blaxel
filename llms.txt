@@ -1,33 +1,36 @@
 # OpenShell on Blaxel
 
-An external OpenShell v0.0.116 compute driver that runs each OpenShell sandbox as a Blaxel mk3 microVM on the `landlock` kernel variant. The gateway runs locally, and sandboxes reach it through a reverse tunnel (WebSocket + yamux) dialed by the driver.
+OpenShell main (RFC 0012 isolation contract) running entirely on Blaxel. A control sandbox runs the OpenShell gateway, this repo's compute driver and one openshell-supervisor per agent. Each agent runs in its own Blaxel mk3 microVM on the `landlock` kernel, under `openshell-sandbox launch-capability-free`, in a network namespace that only has loopback. The supervisor reaches the sandbox through a WebSocket + yamux tunnel. The laptop runs only the CLI.
 
 ## Fast route
 
 1. Read `AGENTS.md`, `README.md`, then `.env.example`.
-2. `make test` (local, safe).
-3. `make setup`, then `make up` (this restarts the driver + gateway and drops open sessions: ask first).
-4. `make status`.
-5. `make e2e` only with approval: it creates and deletes a Blaxel sandbox.
+2. `make test`: local and safe.
+3. `make deploy`: creates or updates the control sandbox. A redeploy drops sessions, so ask first.
+4. `make connect`, then `make status`.
+5. `make e2e`, only with approval: it creates and deletes a Blaxel sandbox.
 
 ## Current contract
 
-- OpenShell: v0.0.116 compute-driver protocol `openshell.compute.v1`, gateway, CLI and `openshell-sandbox` runtime.
-- Blaxel Go SDK `github.com/blaxel-ai/sdk-go` v0.27.2 (as used by blaxel-ai/toolkit / `bl`), generation `mk3`, `spec.runtime.extraArgs: {landlock: enabled}` (Linux 6.18, Landlock ABI v7).
-- Sandboxes are labeled `openshell.ai/driver-owner=<gateway name>`. Instances only manage their own.
-- Default image `blaxel/py-app:latest`. Workload uid 1500 `sandbox`, `HOME=/sandbox`.
-- Gateway settings: `providers_v2_enabled=true`, provider profile `claude-code-blaxel`.
+- OpenShell main `08548713c` (`dev` release): compute-driver `openshell.compute.v1` with extension negotiation (`openshell.compute.contract` 1.x), `openshell-gateway`, `openshell-supervisor`, `openshell-sandbox`.
+- Blaxel Go SDK `github.com/blaxel-ai/sdk-go` v0.27.2 (as used by blaxel-ai/toolkit / `bl`), generation `mk3`.
+- Kernel variants:
+  - workloads use `extraArgs: {landlock: enabled}` (Linux 6.18, Landlock ABI v7);
+  - the control sandbox uses `{tun, iptables}`.
+- Sandboxes are labeled `openshell.ai/driver-owner=<GATEWAY_NAME>` (default `blaxel-main`). Each control plane only manages its own.
+- Default image `blaxel/py-app:latest`. Workload uid/gid 1500, `HOME=/sandbox`.
+- Blaxel networking is IPv6-only with NAT64, and only port 443 goes out. The control sandbox therefore runs a tayga CLAT and a DoH forwarder, because OpenShell main's policy DNS resolves A records only. The upstream fix is on the Joffref/OpenShell branch `feat/policy-dns-ipv6-egress`.
 
 ## Key commands
 
 ```bash
 make test
-make up
+make deploy && make connect
 make status
 make e2e
-openshell -g blaxel sandbox create --name dev --no-tty -- sleep infinity
-openshell -g blaxel sandbox exec -n dev --tty -- bash -l
-openshell -g blaxel logs dev
+make os ARGS='sandbox create --name dev --no-tty -- sleep infinity'
+make os ARGS='sandbox exec -n dev --tty -- bash -l'
+make os ARGS='logs dev'
 ./gw/cleanup.sh dev            # plan
 ./gw/cleanup.sh dev --apply
 ./gw/cleanup.sh --orphans
@@ -35,24 +38,24 @@ openshell -g blaxel logs dev
 
 ## Proof rules
 
-- `RESULT: 22 passed, 0 failed` from `make e2e` proves lifecycle, exec, network policy (L4 + L7), Landlock and stop/start.
-- A matching `os-<name>-<hash>` Blaxel sandbox in `make status` proves Blaxel placement.
-- `"qualified": true` from `openshell-sandbox capability-probe-launch 1500 1500` (OpenShell `main`) proves the kernel, not the driver.
+- `RESULT: 20 passed, 0 failed` from `make e2e` proves lifecycle, isolation (uid, kernel, loopback-only netns, Landlock), network policy (L4 + L7, audit), stop/start with a new generation, and delete.
+- A matching `os-<name>-<hash>` Blaxel sandbox with kernel `landlock` in `make status` proves Blaxel placement.
+- `"qualified": true` from `openshell-sandbox capability-probe-launch 1500 1500` proves the kernel, not the driver.
 
 ## Safety
 
-- The workload has no root, no capabilities, Landlock, seccomp and a netns. Egress goes only through the supervisor proxy.
-- Provider keys stay in the gateway. The workload sees placeholders.
-- The VM holds no Blaxel credentials. The tunnel is dialed from the host.
-- v0.0.116 limitation: the in-VM supervisor is root and holds the gateway client cert + sandbox JWT.
+- The workload has no capabilities, no_new_privs, Landlock and seccomp, and only loopback. Egress goes only through the supervisor, which runs in the control sandbox.
+- The workload VM holds no credentials: no Blaxel key, no gateway JWT, no provider key.
+- Only the driver process in the control sandbox holds the Blaxel service-account key, in a root-only file.
 - Cleanup is plan-only unless `--apply` is given.
-- Restarts keep workloads running but drop sessions.
 
 ## Key files
 
-- `driver/internal/driver/driver.go`: lifecycle, bootstrap, launch env, readiness, recovery.
-- `driver/internal/tunnel/tunnel.go`: reverse tunnel.
+- `driver/internal/driver/driver.go`, `launch.go`: RPCs, lifecycle, bootstrap, fence, supervisor spawn.
+- `driver/internal/boundary/`: main wire formats and per-session TLS.
+- `driver/internal/tunnel/tunnel.go`: tunnel.
 - `driver/internal/blaxel/client.go`: adapter over the Blaxel Go SDK.
+- `driver/cmd/os-deploy/main.go`: control sandbox.
 - `gw/e2e.sh`: acceptance test.
 - `GUIDE.md`: design, security, failure handling, teardown.
 - `docs/KERNEL.md`, `docs/CLAUDE-CODE.md`, `docs/ROADMAP.md`, `docs/RESULTS.md`.
