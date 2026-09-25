@@ -120,7 +120,7 @@ Redeploying (`make deploy`) restarts the gateway and driver. A sandbox pins its 
   - a 464XLAT CLAT (`tayga`), using the NAT64 prefix discovered through `ipv4only.arpa`;
   - a DNS-over-HTTPS forwarder (`os-tunnel dns`) as its first resolver.
 
-  The upstream fix, [NVIDIA/OpenShell `feat/policy-dns-ipv6-egress`](https://github.com/Joffref/OpenShell/tree/feat/policy-dns-ipv6-egress), makes the CLAT unnecessary.
+  The upstream fix, [NVIDIA/OpenShell#3702](https://github.com/NVIDIA/OpenShell/pull/3702) (issue [#3716](https://github.com/NVIDIA/OpenShell/issues/3716)), makes the CLAT unnecessary once it's merged.
 - **Ingress.** Blaxel only exposes HTTPS/WebSocket (`/port/N`), so the CLI and the Sandbox Protocol both ride multiplexed WebSockets. TLS stays end to end inside them.
 
 Read [GUIDE.md](GUIDE.md) for the design, security boundaries, failure handling and teardown, and [AGENTS.md](AGENTS.md) if an AI agent will work in this repo.

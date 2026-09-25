@@ -19,7 +19,7 @@ OpenShell main (RFC 0012 isolation contract) running entirely on Blaxel. A contr
   - the control sandbox uses `{tun, iptables}`.
 - Sandboxes are labeled `openshell.ai/driver-owner=<GATEWAY_NAME>` (default `blaxel-main`). Each control plane only manages its own.
 - Default image `blaxel/py-app:latest`. Workload uid/gid 1500, `HOME=/sandbox`.
-- Blaxel networking is IPv6-only with NAT64, and only port 443 goes out. The control sandbox therefore runs a tayga CLAT and a DoH forwarder, because OpenShell main's policy DNS resolves A records only. The upstream fix is on the Joffref/OpenShell branch `feat/policy-dns-ipv6-egress`.
+- Blaxel networking is IPv6-only with NAT64, and only port 443 goes out. The control sandbox therefore runs a tayga CLAT and a DoH forwarder, because OpenShell main's policy DNS resolves A records only. The upstream fix is NVIDIA/OpenShell PR #3702 (issue #3716), in review.
 
 ## Key commands
 

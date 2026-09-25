@@ -69,7 +69,7 @@ Blaxel sandboxes are IPv6-only with NAT64/DNS64, and only HTTPS (port 443) leave
    - The supervisor reaches each sandbox through a tunnel the driver dials into the workload's `/port/9000`.
 
    Both tunnels multiplex streams with yamux and keep TLS end to end.
-2. **Supervisor egress needs IPv4.** OpenShell main's mediated policy DNS answers AAAA queries empty and resolves A records only. That is fixed upstream on `feat/policy-dns-ipv6-egress` and not yet merged. The control sandbox therefore runs:
+2. **Supervisor egress needs IPv4.** OpenShell main's mediated policy DNS answers AAAA queries empty and resolves A records only. The fix is in review upstream, in [NVIDIA/OpenShell#3702](https://github.com/NVIDIA/OpenShell/pull/3702). The control sandbox therefore runs:
    - a **CLAT**: `tayga` translates IPv4 to IPv6 through the NAT64 prefix, which `clat.sh` discovers from `ipv4only.arpa` (RFC 7050). Translated packets leave through the VM's single IPv6 address via MASQUERADE;
    - a **DNS-over-HTTPS forwarder**: `os-tunnel dns` on `127.0.0.2:53`, first in `/etc/resolv.conf`. It relays queries to Cloudflare's DoH endpoint over IPv6, because classic DNS to public resolvers doesn't leave Blaxel.
 
@@ -102,7 +102,7 @@ Driver flags, set by `os-deploy`:
 - The service-account key only exists in the control sandbox, in a root-only file sourced by the driver process. The gateway is started with it unset.
 - Each control plane only manages sandboxes labeled with its owner (`openshell.ai/driver-owner`). Recovery, `status` and `cleanup --orphans` never touch another control plane's sandboxes.
 - Launch environment from the user can't override `OPENSHELL_*` names. It goes to the workload only (`child_env`).
-- Known gap, upstream: `is_internal_ip` doesn't look inside NAT64 prefixes. With IPv6 policy DNS answers enabled, a DNS64 answer that wraps a private IPv4 address would pass the public-only check for wildcard hosts. Keep wildcard policies narrow on NAT64 hosts.
+- Known gap in OpenShell main: the SSRF checks don't look inside NAT64 prefixes, so a DNS64 answer that wraps a private IPv4 address passes the public-only check for wildcard hosts. [NVIDIA/OpenShell#3702](https://github.com/NVIDIA/OpenShell/pull/3702) fixes it (NAT64 addresses are checked as their embedded IPv4 address, with `nat64_prefixes` for network-specific prefixes). Until it's merged, keep wildcard policies narrow on NAT64 hosts.
 
 ## Operations
 
