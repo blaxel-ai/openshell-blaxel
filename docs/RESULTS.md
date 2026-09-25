@@ -70,7 +70,7 @@ With the CLAT and DoH forwarder in place, allowed hosts return 200 and L7-denied
 
 ### Upstream fix, live (`experiments/ipv6-egress-live.sh`)
 
-Patched `openshell-supervisor` from `Joffref/OpenShell:feat/policy-dns-ipv6-egress` (`--policy-dns-ipv6-egress auto`):
+Patched `openshell-supervisor` from the first commit of [NVIDIA/OpenShell#3702](https://github.com/NVIDIA/OpenShell/pull/3702) (`--policy-dns-ipv6-egress auto`):
 
 | Mode | Control sandbox network | Policy DNS | `GET api.github.com/zen` | `POST` (read-only rule) |
 |---|---|---|---|---|
