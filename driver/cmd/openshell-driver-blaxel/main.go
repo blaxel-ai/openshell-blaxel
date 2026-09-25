@@ -1,8 +1,10 @@
-// openshell-driver-blaxel is an external OpenShell (v0.0.116) compute driver
-// that runs sandboxes as Blaxel microVMs. The gateway connects to it over a
-// Unix socket:
+// openshell-driver-blaxel is an external OpenShell (main, RFC 0012) compute
+// driver that runs sandboxes as Blaxel microVMs. It runs next to the gateway
+// in a Blaxel control sandbox, serves the gateway over a Unix socket, and
+// spawns one openshell-supervisor per sandbox:
 //
-//	openshell-gateway --drivers blaxel --compute-driver-socket <socket> ...
+//	[openshell.gateway] compute_driver = "blaxel"
+//	[openshell.drivers.blaxel] socket_path = "<socket>"
 package main
 
 import (
@@ -34,12 +36,14 @@ func main() {
 	flag.StringVar(&cfg.Region, "region", "us-was-1", "Blaxel region")
 	flag.StringVar(&cfg.DefaultImage, "image", "blaxel/py-app:latest", "Blaxel image used when the request's image is not a Blaxel image")
 	flag.IntVar(&cfg.MemoryMiB, "memory", 4096, "default sandbox memory in MiB")
-	flag.StringVar(&cfg.GatewayAddr, "gateway-addr", "127.0.0.1:17680", "gateway listener the tunnel forwards to")
-	flag.IntVar(&cfg.InVMGatewayPort, "vm-gateway-port", 17680, "loopback port inside the VM that reaches the gateway")
-	flag.IntVar(&cfg.TunnelPort, "tunnel-port", 9000, "Blaxel sandbox port for the tunnel WebSocket")
-	flag.StringVar(&cfg.TLSDir, "tls-dir", "", "gateway TLS dir with ca.crt and client/tls.{crt,key}")
-	flag.StringVar(&cfg.SandboxBinary, "sandbox-bin", "", "linux x86_64 openshell-sandbox v0.0.116")
-	flag.StringVar(&cfg.TunnelBinary, "tunnel-bin", "", "linux x86_64 os-tunnel")
+	flag.IntVar(&cfg.TunnelPort, "tunnel-port", 9000, "workload sandbox port for the supervisor tunnel")
+	flag.StringVar(&cfg.SandboxBinary, "sandbox-bin", "", "linux x86_64 openshell-sandbox (OpenShell main), uploaded into workloads")
+	flag.StringVar(&cfg.TunnelBinary, "tunnel-bin", "", "linux x86_64 os-tunnel, uploaded into workloads")
+	flag.StringVar(&cfg.SupervisorBinary, "supervisor-bin", "", "openshell-supervisor (OpenShell main), run next to the gateway")
+	flag.StringVar(&cfg.StateDir, "state-dir", "/var/lib/openshell-blaxel", "per-sandbox descriptors, auth bundles and supervisor logs")
+	flag.StringVar(&cfg.GatewayEndpoint, "gateway-endpoint", "https://127.0.0.1:17670", "gateway URL for supervisors")
+	tlsDir := flag.String("gateway-tls-dir", "", "gateway PKI dir (ca.crt, client/tls.{crt,key}) for supervisor mTLS")
+	flag.StringVar(&cfg.LogLevel, "log-level", "info", "default OpenShell log level for sandboxes")
 	packages := flag.String("packages", "curl,git,ca-certificates", "comma-separated packages installed as root in every sandbox")
 	flag.BoolVar(&cfg.InstallClaude, "install-claude", true, "install Claude Code at /usr/local/bin/claude in every sandbox")
 	kernel := flag.String("kernel-variant", "landlock", "Blaxel kernel variant enabled via spec.runtime.extraArgs (empty for the default kernel)")
@@ -58,7 +62,13 @@ func main() {
 	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	for name, v := range map[string]string{"-workspace": *workspace, "-tls-dir": cfg.TLSDir, "-sandbox-bin": cfg.SandboxBinary, "-tunnel-bin": cfg.TunnelBinary} {
+	if *tlsDir != "" {
+		cfg.GatewayCA = filepath.Join(*tlsDir, "ca.crt")
+		cfg.GatewayCert = filepath.Join(*tlsDir, "client", "tls.crt")
+		cfg.GatewayKey = filepath.Join(*tlsDir, "client", "tls.key")
+	}
+	for name, v := range map[string]string{"-workspace": *workspace, "-sandbox-bin": cfg.SandboxBinary, "-tunnel-bin": cfg.TunnelBinary,
+		"-supervisor-bin": cfg.SupervisorBinary, "-gateway-tls-dir": *tlsDir} {
 		if v == "" {
 			fmt.Fprintf(os.Stderr, "%s is required\n", name)
 			os.Exit(2)
@@ -68,6 +78,10 @@ func main() {
 	bl, err := blaxel.NewClient(*workspace, *env)
 	if err != nil {
 		log.Error("blaxel", "err", err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		log.Error("state dir", "err", err)
 		os.Exit(1)
 	}
 	d := driver.New(cfg, bl, log)

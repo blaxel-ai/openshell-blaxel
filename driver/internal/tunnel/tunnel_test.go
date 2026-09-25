@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -22,16 +23,16 @@ func freePort(t *testing.T) string {
 	return l.Addr().String()
 }
 
-// TestReverseTunnelRoundTrip runs both halves locally: connections accepted
-// on the "in-VM" loopback address must reach the "host" target through one
-// WebSocket session, concurrently and byte-exact.
-func TestReverseTunnelRoundTrip(t *testing.T) {
+// TestTunnelToUnixTarget runs both halves locally: connections accepted on the
+// control-side loopback port must reach a Unix-socket target (standing in for
+// openshell-sandbox's boundary listener) concurrently and byte-exact.
+func TestTunnelToUnixTarget(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Host-side target: an echo server standing in for the gateway.
-	target, err := net.Listen("tcp", "127.0.0.1:0")
+	sock := filepath.Join(t.TempDir(), "boundary.sock")
+	target, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,21 +47,16 @@ func TestReverseTunnelRoundTrip(t *testing.T) {
 		}
 	}()
 
-	wsAddr, localAddr := freePort(t), freePort(t)
-	go Serve(ctx, wsAddr, localAddr, log)
+	wsAddr := freePort(t)
+	go Serve(ctx, wsAddr, "unix:"+sock, log)
 
-	up := make(chan struct{}, 1)
-	go Dial(ctx, "ws://"+wsAddr+"/tunnel", func() (http.Header, error) { return http.Header{}, nil },
-		target.Addr().String(), log, func(ok bool) {
-			if ok {
-				select {
-				case up <- struct{}{}:
-				default:
-				}
-			}
-		})
+	ep, err := Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go ep.Run(ctx, "ws://"+wsAddr+"/tunnel", func() (http.Header, error) { return http.Header{}, nil }, log)
 	select {
-	case <-up:
+	case <-ep.Ready():
 	case <-time.After(10 * time.Second):
 		t.Fatal("tunnel did not come up")
 	}
@@ -70,9 +66,9 @@ func TestReverseTunnelRoundTrip(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			c, err := net.DialTimeout("tcp", localAddr, 5*time.Second)
+			c, err := net.DialTimeout("tcp", ep.Addr().String(), 5*time.Second)
 			if err != nil {
-				t.Errorf("dial local: %v", err)
+				t.Errorf("dial: %v", err)
 				return
 			}
 			defer c.Close()
@@ -88,23 +84,18 @@ func TestReverseTunnelRoundTrip(t *testing.T) {
 	wg.Wait()
 }
 
-// TestServeDropsConnectionsWithoutHostSession checks that nothing inside the
-// VM can reach the host before the driver has attached.
-func TestServeDropsConnectionsWithoutHostSession(t *testing.T) {
+// TestEndpointDropsConnectionsWhileDisconnected: nothing reaches the workload
+// before the tunnel is attached.
+func TestEndpointDropsConnectionsWhileDisconnected(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	wsAddr, localAddr := freePort(t), freePort(t)
-	go Serve(ctx, wsAddr, localAddr, log)
-
-	var c net.Conn
-	var err error
-	for i := 0; i < 50; i++ {
-		if c, err = net.Dial("tcp", localAddr); err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+	ep, err := Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
+	go ep.Run(ctx, "ws://127.0.0.1:1/tunnel", func() (http.Header, error) { return http.Header{}, nil }, log)
+	c, err := net.Dial("tcp", ep.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}

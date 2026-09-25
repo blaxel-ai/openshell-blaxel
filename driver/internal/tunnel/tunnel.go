@@ -1,13 +1,17 @@
-// Package tunnel carries TCP connections from inside a Blaxel sandbox back to
-// a service on the driver host, over one WebSocket that the host dials in.
+// Package tunnel carries the OpenShell Sandbox Protocol from the supervisor
+// (in the Blaxel control sandbox) to openshell-sandbox (in a workload sandbox),
+// over one WebSocket that the control side dials in.
 //
-// Blaxel only exposes sandbox ports as authenticated HTTPS/WebSocket, and the
-// sandbox must not hold credentials that could reach the gateway host. So the
-// host opens the WebSocket (with its Blaxel token), and the sandbox side
-// multiplexes each local connection as a yamux stream back to the host:
+// Blaxel exposes sandbox ports only as authenticated HTTPS/WebSocket, and the
+// workload VM must hold no credentials, so the control side dials the
+// WebSocket with its Blaxel token and multiplexes each supervisor connection
+// as a yamux stream:
 //
-//	sandbox: openshell-sandbox -> 127.0.0.1:17680 -> Serve (yamux client, opens streams)
-//	host:    Dial (yamux server, accepts streams) -> gateway 127.0.0.1:<port>
+//	control:  supervisor -> 127.0.0.1:<port> -> Dial (yamux client, opens streams)
+//	workload: Serve (yamux server, accepts streams) -> unix:/run/openshell/boundary.sock
+//
+// The Sandbox Protocol is TLS 1.3 end to end inside each stream, so neither
+// Blaxel's edge nor this tunnel can read or alter it.
 package tunnel
 
 import (
@@ -18,6 +22,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,47 +46,26 @@ func pipe(a, b net.Conn) {
 	once.Do(closeBoth)
 }
 
-// Serve runs inside the sandbox. It accepts the host's WebSocket on wsAddr and
-// forwards every connection accepted on localAddr through it. Only one host
-// session is active at a time; a new one replaces the old.
-func Serve(ctx context.Context, wsAddr, localAddr string, log *slog.Logger) error {
-	var mu sync.Mutex
-	var session *yamux.Session
-
-	local, err := net.Listen("tcp", localAddr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", localAddr, err)
+// splitTarget parses "unix:/path" or "tcp:host:port" (or a bare host:port).
+func splitTarget(t string) (network, addr string) {
+	if rest, ok := strings.CutPrefix(t, "unix:"); ok {
+		return "unix", rest
 	}
-	go func() {
-		for {
-			c, err := local.Accept()
-			if err != nil {
-				return
-			}
-			mu.Lock()
-			s := session
-			mu.Unlock()
-			if s == nil || s.IsClosed() {
-				log.Warn("no host session; dropping local connection")
-				c.Close()
-				continue
-			}
-			go func() {
-				stream, err := s.Open()
-				if err != nil {
-					log.Warn("open stream", "err", err)
-					c.Close()
-					return
-				}
-				pipe(c, stream)
-			}()
-		}
-	}()
+	return "tcp", strings.TrimPrefix(t, "tcp:")
+}
+
+// Serve runs in the workload sandbox. It accepts the control side's WebSocket
+// on wsAddr and connects every stream to target. A new session replaces the
+// previous one, so a restarted driver can re-attach.
+func Serve(ctx context.Context, wsAddr, target string, log *slog.Logger) error {
+	network, addr := splitTarget(target)
+	var mu sync.Mutex
+	var current *yamux.Session
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
-		up := session != nil && !session.IsClosed()
+		up := current != nil && !current.IsClosed()
 		mu.Unlock()
 		if !up {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -95,37 +79,82 @@ func Serve(ctx context.Context, wsAddr, localAddr string, log *slog.Logger) erro
 		}
 		ws.SetReadLimit(-1)
 		conn := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
-		s, err := yamux.Client(conn, yamuxConfig())
+		session, err := yamux.Server(conn, yamuxConfig())
 		if err != nil {
 			conn.Close()
 			return
 		}
 		mu.Lock()
-		if session != nil {
-			session.Close()
+		if current != nil {
+			current.Close()
 		}
-		session = s
+		current = session
 		mu.Unlock()
-		log.Info("host session attached", "remote", r.RemoteAddr)
-		<-s.CloseChan()
-		log.Info("host session closed")
+		log.Info("control session attached", "remote", r.RemoteAddr)
+		for {
+			stream, err := session.Accept()
+			if err != nil {
+				log.Info("control session closed", "err", err)
+				return
+			}
+			go func() {
+				up, err := net.DialTimeout(network, addr, 5*time.Second)
+				if err != nil {
+					log.Warn("dial target", "target", target, "err", err)
+					stream.Close()
+					return
+				}
+				pipe(stream, up)
+			}()
+		}
 	})
 	srv := &http.Server{Addr: wsAddr, Handler: mux}
-	go func() { <-ctx.Done(); srv.Close(); local.Close() }()
+	go func() { <-ctx.Done(); srv.Close() }()
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
 }
 
-// Dial runs on the driver host. It keeps a session to url open (reconnecting
-// with backoff until ctx ends) and connects each stream to target.
-// header returns fresh request headers per attempt so tokens can rotate.
-func Dial(ctx context.Context, url string, header func() (http.Header, error), target string, log *slog.Logger, onState func(up bool)) {
+// Endpoint is the control side of one tunnel: a local listener whose
+// connections are carried to the workload sandbox.
+type Endpoint struct {
+	listener net.Listener
+
+	mu      sync.Mutex
+	session *yamux.Session
+	ready   chan struct{}
+}
+
+// Addr is the loopback address the supervisor dials.
+func (e *Endpoint) Addr() *net.TCPAddr { return e.listener.Addr().(*net.TCPAddr) }
+
+// Listen binds a loopback port for one workload (port 0 picks a free one).
+func Listen(addr string) (*Endpoint, error) {
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	return &Endpoint{listener: l, ready: make(chan struct{})}, nil
+}
+
+// Ready is closed once the first session is up.
+func (e *Endpoint) Ready() <-chan struct{} { return e.ready }
+
+// Run keeps a session to url open (reconnecting with backoff until ctx ends)
+// and forwards accepted local connections through it. header returns fresh
+// request headers per attempt so tokens can rotate.
+func (e *Endpoint) Run(ctx context.Context, url string, header func() (http.Header, error), log *slog.Logger) {
+	go func() { <-ctx.Done(); e.listener.Close() }()
+	go e.accept(log)
+	var once sync.Once
 	backoff := time.Second
 	for ctx.Err() == nil {
-		err := dialOnce(ctx, url, header, target, log, func() { backoff = time.Second; onState(true) })
-		onState(false)
+		err := e.dialOnce(ctx, url, header, func() {
+			backoff = time.Second
+			once.Do(func() { close(e.ready) })
+			log.Info("tunnel up", "url", url)
+		})
 		if ctx.Err() != nil {
 			return
 		}
@@ -139,7 +168,35 @@ func Dial(ctx context.Context, url string, header func() (http.Header, error), t
 	}
 }
 
-func dialOnce(ctx context.Context, url string, header func() (http.Header, error), target string, log *slog.Logger, onUp func()) error {
+func (e *Endpoint) accept(log *slog.Logger) {
+	for {
+		c, err := e.listener.Accept()
+		if err != nil {
+			return
+		}
+		if tc, ok := c.(*net.TCPConn); ok {
+			tc.SetNoDelay(true)
+		}
+		e.mu.Lock()
+		s := e.session
+		e.mu.Unlock()
+		if s == nil || s.IsClosed() {
+			log.Warn("tunnel not connected; dropping connection")
+			c.Close()
+			continue
+		}
+		go func() {
+			stream, err := s.Open()
+			if err != nil {
+				c.Close()
+				return
+			}
+			pipe(c, stream)
+		}()
+	}
+}
+
+func (e *Endpoint) dialOnce(ctx context.Context, url string, header func() (http.Header, error), onUp func()) error {
 	h, err := header()
 	if err != nil {
 		return err
@@ -155,31 +212,20 @@ func dialOnce(ctx context.Context, url string, header func() (http.Header, error
 	}
 	ws.SetReadLimit(-1)
 	conn := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
-	session, err := yamux.Server(conn, yamuxConfig())
+	session, err := yamux.Client(conn, yamuxConfig())
 	if err != nil {
 		conn.Close()
 		return err
 	}
-	defer session.Close()
-	go func() { <-ctx.Done(); session.Close() }()
+	e.mu.Lock()
+	e.session = session
+	e.mu.Unlock()
 	onUp()
-	log.Info("tunnel up", "url", url)
-	for {
-		stream, err := session.Accept()
-		if err != nil {
-			return err
-		}
-		go func() {
-			up, err := net.DialTimeout("tcp", target, 5*time.Second)
-			if err != nil {
-				log.Warn("dial target", "target", target, "err", err)
-				stream.Close()
-				return
-			}
-			if tc, ok := up.(*net.TCPConn); ok {
-				tc.SetNoDelay(true)
-			}
-			pipe(stream, up)
-		}()
+	select {
+	case <-ctx.Done():
+		session.Close()
+		return ctx.Err()
+	case <-session.CloseChan():
+		return errors.New("session closed")
 	}
 }
