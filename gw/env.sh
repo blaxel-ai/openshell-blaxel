@@ -1,9 +1,8 @@
 #!/bin/sh
-# Shared settings for the local Blaxel-backed OpenShell gateway. Override any
-# of these in the environment before running the scripts in this directory.
+# Shared settings for the Blaxel-hosted OpenShell control plane. Override any
+# of these in .env (see .env.example) or in the environment.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# Optional local overrides (gitignored); see .env.example.
 if [ -f "$ROOT/.env" ]; then
   set -a
   . "$ROOT/.env"
@@ -13,19 +12,21 @@ fi
 : "${BL_WORKSPACE:=charlou-dev}"
 : "${BL_ENV:=dev}"
 : "${BL_REGION:=us-was-1}"
-: "${OPENSHELL_GATEWAY_BIN:=$(command -v openshell-gateway || echo /opt/homebrew/opt/openshell/bin/openshell-gateway)}"
-: "${GATEWAY_NAME:=blaxel}"
-: "${GATEWAY_PORT:=17680}"
-: "${DRIVER_SOCKET:=/tmp/openshell-blaxel/driver.sock}"
-: "${KERNEL_VARIANT:=landlock}"
-: "${SANDBOX_PACKAGES:=curl,git,ca-certificates}"
+# Control sandbox running the gateway, the driver and the supervisors.
+: "${CONTROL_SANDBOX:=os-control}"
+# Driver owner label and CLI gateway name (one per control plane).
+: "${GATEWAY_NAME:=blaxel-main}"
+# Laptop port the CLI uses; os-tunnel dial forwards it to the gateway.
+: "${LOCAL_PORT:=17690}"
+# OpenShell main CLI and an isolated CLI config (keeps other OpenShell
+# installs on the laptop untouched).
+: "${OS_BIN:=$ROOT/bin/main/openshell}"
+: "${OS_CONFIG_HOME:=$HOME/.openshell-blaxel/cli-config}"
+: "${CLIENT_BUNDLE:=$HOME/.openshell-blaxel/mtls}"
 
-export BL_WORKSPACE BL_ENV BL_REGION OPENSHELL_GATEWAY_BIN GATEWAY_NAME GATEWAY_PORT DRIVER_SOCKET KERNEL_VARIANT SANDBOX_PACKAGES
+export BL_WORKSPACE BL_ENV BL_REGION CONTROL_SANDBOX GATEWAY_NAME LOCAL_PORT OS_BIN OS_CONFIG_HOME CLIENT_BUNDLE
+export XDG_CONFIG_HOME="$OS_CONFIG_HOME"
 GW_DIR="$ROOT/gw"
-TLS_DIR="$GW_DIR/tls"
-# Per-gateway state so several instances can run side by side. The default
-# gateway keeps the historical file names.
-if [ "$GATEWAY_NAME" = blaxel ]; then STATE_PREFIX="$GW_DIR/"; else STATE_PREFIX="$GW_DIR/$GATEWAY_NAME-"; fi
-: "${GATEWAY_DB:=${STATE_PREFIX}gateway.db}"
-DRIVER_LOG="${STATE_PREFIX}driver.log"
-GATEWAY_LOG="${STATE_PREFIX}gateway.log"
+TUNNEL_LOG="$HOME/.openshell-blaxel/tunnel-$GATEWAY_NAME.log"
+
+oscli() { "$OS_BIN" -g "$GATEWAY_NAME" "$@" 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g'; }

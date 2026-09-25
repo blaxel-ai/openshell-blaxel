@@ -35,3 +35,50 @@ OpenShell `main` (679b190) `openshell-sandbox capability-probe-launch 1500 1500`
 
 History of the variant: first build was 6.1 (ABI v2, fails on Truncate); second build 6.18 panicked
 at boot (`FIPS140 loader: module loading error`, no modules in Firecracker boot); current build boots.
+
+## 2026-09-24: OpenShell main entirely on Blaxel (charlou-dev, us-was-1 dev)
+
+OpenShell main `08548713c` (`dev` release `0.0.117-dev.281`).
+- Gateway, driver and supervisors run in the control sandbox `os-control`.
+- Workloads run on the `landlock` kernel.
+
+`make e2e`: **20 passed, 0 failed**:
+- ready in ~15 s;
+- uid 1500 and a netns with only `lo`;
+- raw egress blocked, Landlock deny;
+- no credentials in the VM;
+- L4 + L7 policy with audit;
+- stop/start with a new generation;
+- delete.
+
+### Wire contract
+
+- `boundary/fixture` against the real main `openshell-sandbox`: `BoundaryConfig` accepted, `Boundary control listener ready`.
+- The supervisor attaches over per-session TLS 1.3 (Ed25519, ALPN h2) through the tunnel.
+- The gateway accepts the driver's extension metadata and admission ack.
+
+### Networking findings
+
+| Finding | Evidence | Resolution |
+|---|---|---|
+| Blaxel sandboxes are IPv6-only, with NAT64/DNS64 | `ipv4only.arpa` → `2600:1f18:4928:5601:d32b::c000:aa` | NAT64 prefix `…:d32b::/96` (RFC 7050) |
+| Only TCP 443 leaves the platform | UDP/TCP 53 to 1.1.1.1 / 8.8.8.8 time out through NAT64 | DoH forwarder (`os-tunnel dns`) |
+| Main's policy DNS drops AAAA answers | `DENIED api.github.com:53 [reason:policy_dns_upstream_no_data]`; `ipv6_egress = false` hardcoded in `policy_dns/runtime.rs` | CLAT in the control sandbox (tayga + MASQUERADE, `tun` + `iptables` kernel variants) |
+| No `sysctl` binary in the image | `sysctl: not found` | write `/proc/sys` directly |
+
+With the CLAT and DoH forwarder in place, allowed hosts return 200 and L7-denied requests return 403.
+
+### Upstream fix, live (`experiments/ipv6-egress-live.sh`)
+
+Patched `openshell-supervisor` from `Joffref/OpenShell:feat/policy-dns-ipv6-egress` (`--policy-dns-ipv6-egress auto`):
+
+| Mode | Control sandbox network | Policy DNS | `GET api.github.com/zen` | `POST` (read-only rule) |
+|---|---|---|---|---|
+| `ipv6only` | CLAT removed, IPv6 only | IPv6 egress enabled, synthetic `fd23:6f70:656e::/48` | 200 | 403 |
+| `dualstack` | CLAT on | IPv6 egress disabled (unchanged), synthetic `198.18.0.0/15` | 200 | 403 |
+
+### Other main differences
+
+- No `providers_v2_enabled` gateway setting and no built-in provider profiles. `provider profile import` works.
+- `policy get --base` output has no trailing newline.
+- The SSH socket path under the state dir exceeded `SUN_LEN`, so it was moved to `/run/openshell-blaxel/<hash>/`.

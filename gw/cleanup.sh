@@ -19,10 +19,10 @@ done
 plan=""
 for n in $names; do
   plan="$plan
-openshell -g $GATEWAY_NAME sandbox delete $n"
+XDG_CONFIG_HOME=$OS_CONFIG_HOME $OS_BIN -g $GATEWAY_NAME sandbox delete $n"
 done
 if [ "$orphans" = true ]; then
-  known=$(openshell -g "$GATEWAY_NAME" sandbox list 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | awk 'NR>1 {print $1}')
+  known=$(oscli sandbox list | awk 'NR>1 {print $1}')
   for b in $(bl get sandboxes -w "$BL_WORKSPACE" -o json 2>/dev/null | KNOWN="$known" python3 -c '
 import json, os, sys
 known = set(os.environ["KNOWN"].split())
