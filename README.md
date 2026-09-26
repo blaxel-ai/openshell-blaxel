@@ -1,8 +1,10 @@
 # OpenShell on Blaxel
 
-NVIDIA [OpenShell](https://github.com/NVIDIA/OpenShell) is a policy runtime for autonomous agents. It confines an agent's network egress to named binaries and hosts, inspects HTTP at L7, injects credentials the agent never sees, and restricts the filesystem with Landlock.
+NVIDIA [OpenShell](https://github.com/NVIDIA/OpenShell) is a policy runtime for autonomous agents. It confines an agent's network egress to named binaries and hosts, inspects HTTP at L7, injects credentials, and restricts the filesystem with Landlock.
 
-This repository runs OpenShell **main** entirely on Blaxel. A control sandbox hosts the OpenShell gateway, this repository's compute driver, and one OpenShell supervisor per agent. Every agent gets its own Blaxel microVM, where OpenShell's sandbox runtime confines it. Your laptop only runs the `openshell` CLI.
+This repository runs OpenShell **main** entirely on [Blaxel](https://blaxel.ai), using microVM sandboxes. A control sandbox hosts the OpenShell gateway, this repository's compute driver, and one OpenShell supervisor per agent. Every agent gets its own Blaxel microVM, where OpenShell's sandbox runtime confines it. Your laptop only runs the `openshell` CLI.
+
+This setup lets you leverage OpenShell on microVM compute and combine it with Blaxel's other storage primitives (a distributed filesystem to share files in real-time between sandboxes) and networking primitives (for dynamic firewalling or request auditing).
 
 ```mermaid
 flowchart LR
