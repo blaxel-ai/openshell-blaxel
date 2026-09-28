@@ -65,7 +65,7 @@ ip6tables -t nat -S POSTROUTING              # shows the CLAT MASQUERADE rule
 ip -4 route                                  # default dev clat
 ```
 
-Checked on `os-control` (dev, us-was-1): `/dev/net/tun` present,
+Checked on `os-control` (us-was-1): `/dev/net/tun` present,
 `-A POSTROUTING -s fd64:c1a7:0:1::/96 -o eth0 -j MASQUERADE`, and
 `default dev clat`.
 
@@ -78,7 +78,7 @@ and the control sandbox can go back to the default kernel.
 | Control | `tun` + `iptables` | 6.1.166 | TUN, ip6tables NAT |
 | Default | none | 6.1.166 | none of the above |
 
-## History (dev, us-was-1)
+## History (us-was-1)
 
 | Build | Kernel | Result |
 |---|---|---|
@@ -87,5 +87,5 @@ and the control sandbox can go back to the default kernel.
 | landlock #2 | 6.18.25 | panic at boot: `FIPS140 loader: module loading error` (FIPS140 built as a module, no modules in Firecracker boot) |
 | landlock #3 | 6.18.25 | boots in 1.6 s, ABI v7, **`qualified: true`** |
 
-For reference, eu-dub-1 (workspace `main`) runs 6.12.75 with
+For reference, eu-dub-1 runs 6.12.75 with
 `# CONFIG_SECURITY_LANDLOCK is not set`.

@@ -10,7 +10,7 @@ SUP=${SUP:?path to patched openshell-supervisor}
 export XDG_CONFIG_HOME=$HOME/.openshell-blaxel/cli-config
 OS="bin/main/openshell -g blaxel-main"
 NAME=v6-$MODE-$(date +%H%M%S)
-set -a; . ./.env; set +a; export BL_ENV=dev
+set -a; . ./.env; set +a
 run() { (cd experiments && node run.mjs os-control "$1"); }
 
 echo "== control network: $MODE"

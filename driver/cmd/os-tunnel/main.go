@@ -48,7 +48,7 @@ func main() {
 		port := fs.Int("port", 9000, "sandbox port os-tunnel serve listens on")
 		listen := fs.String("listen", "127.0.0.1:17670", "local listen address")
 		workspace := fs.String("workspace", os.Getenv("BL_WORKSPACE"), "Blaxel workspace")
-		env := fs.String("env", os.Getenv("BL_ENV"), "Blaxel environment (prod or dev)")
+		env := fs.String("env", os.Getenv("BL_ENV"), "Blaxel environment")
 		fs.Parse(os.Args[2:])
 		if *sandbox == "" || *workspace == "" {
 			fmt.Fprintln(os.Stderr, "dial needs -sandbox and -workspace (or BL_WORKSPACE)")

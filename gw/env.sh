@@ -9,8 +9,8 @@ if [ -f "$ROOT/.env" ]; then
   set +a
 fi
 
-: "${BL_WORKSPACE:=charlou-dev}"
-: "${BL_ENV:=dev}"
+: "${BL_WORKSPACE:=my-workspace}"
+: "${BL_ENV:=prod}"
 : "${BL_REGION:=us-was-1}"
 # Control sandbox running the gateway, the driver and the supervisors.
 : "${CONTROL_SANDBOX:=os-control}"

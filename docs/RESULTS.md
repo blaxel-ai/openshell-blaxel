@@ -1,6 +1,6 @@
 # OpenShell on Blaxel — experiment results (2026-09-23)
 
-Workspace `charlou-dev`, env `dev`, region `us-was-1`, OpenShell v0.0.116 release binaries.
+Region `us-was-1`, OpenShell v0.0.116 release binaries.
 
 | # | Question | Result |
 |---|---|---|
@@ -17,7 +17,7 @@ Gotchas found: `openshell gateway add --local` overwrites the gateway's `mtls/` 
 Go `RawSyscall` while seccomp-blocked deadlocks the runtime (use `Syscall`); Alpine `gcompat` can't run the
 glibc gateway (use `blaxel/py-app`, Debian 13).
 
-## 2026-09-24: Landlock kernel variant (charlou-dev, us-was-1 dev)
+## 2026-09-24: Landlock kernel variant (us-was-1)
 
 Sandbox created with `spec.runtime.extraArgs: {landlock: "enabled"}` boots `vmlinux-landlock` (Linux 6.18.25)
 in 1.6 s. `lsm=capability,landlock`, Landlock ABI v7.
@@ -36,7 +36,7 @@ OpenShell `main` (679b190) `openshell-sandbox capability-probe-launch 1500 1500`
 History of the variant: first build was 6.1 (ABI v2, fails on Truncate); second build 6.18 panicked
 at boot (`FIPS140 loader: module loading error`, no modules in Firecracker boot); current build boots.
 
-## 2026-09-24: OpenShell main entirely on Blaxel (charlou-dev, us-was-1 dev)
+## 2026-09-24: OpenShell main entirely on Blaxel (us-was-1)
 
 OpenShell main `08548713c` (`dev` release `0.0.117-dev.281`).
 - Gateway, driver and supervisors run in the control sandbox `os-control`.
