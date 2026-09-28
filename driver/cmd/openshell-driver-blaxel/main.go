@@ -31,7 +31,7 @@ func main() {
 	var cfg driver.Config
 	socket := flag.String("socket", "/tmp/openshell-blaxel/driver.sock", "Unix socket the gateway connects to")
 	workspace := flag.String("workspace", os.Getenv("BL_WORKSPACE"), "Blaxel workspace")
-	env := flag.String("env", envOr("BL_ENV", "prod"), "Blaxel environment: prod or dev")
+	env := flag.String("env", envOr("BL_ENV", "prod"), "Blaxel environment")
 	flag.StringVar(&cfg.Owner, "owner", driver.DefaultOwner, "driver instance identity (use the gateway name); recovery only adopts sandboxes with this owner")
 	flag.StringVar(&cfg.Region, "region", "us-was-1", "Blaxel region")
 	flag.StringVar(&cfg.DefaultImage, "image", "blaxel/py-app:latest", "Blaxel image used when the request's image is not a Blaxel image")

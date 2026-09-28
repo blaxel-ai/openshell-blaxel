@@ -81,7 +81,7 @@ Workload sandboxes are unaffected: they have no network interface besides loopba
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `BL_WORKSPACE`, `BL_ENV`, `BL_REGION` | `charlou-dev`, `dev`, `us-was-1` | Where the control and workload sandboxes run |
+| `BL_WORKSPACE`, `BL_ENV`, `BL_REGION` | `my-workspace`, `prod`, `us-was-1` | Where the control and workload sandboxes run |
 | `BL_API_KEY` | none | Service-account key given to the driver. Required by `make deploy` |
 | `CONTROL_SANDBOX` | `os-control` | Control sandbox name |
 | `GATEWAY_NAME` | `blaxel-main` | CLI gateway name and driver owner label |

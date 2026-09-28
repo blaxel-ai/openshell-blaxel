@@ -31,7 +31,7 @@ type Client struct {
 
 // NewClient authenticates like `bl`: BL_API_KEY when set, otherwise the
 // workspace's `bl login` session (refreshed automatically by the SDK). env is
-// "prod" or "dev".
+// the Blaxel environment (usually "prod").
 func NewClient(workspace, env string) (*Client, error) {
 	if env != "" {
 		os.Setenv("BL_ENV", env)

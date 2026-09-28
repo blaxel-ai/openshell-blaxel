@@ -56,7 +56,7 @@ func main() {
 	var o opts
 	fs.StringVar(&o.name, "name", "os-control", "control sandbox name")
 	fs.StringVar(&o.workspace, "workspace", os.Getenv("BL_WORKSPACE"), "Blaxel workspace")
-	fs.StringVar(&o.env, "env", envOr("BL_ENV", "prod"), "Blaxel environment (prod or dev)")
+	fs.StringVar(&o.env, "env", envOr("BL_ENV", "prod"), "Blaxel environment")
 	fs.StringVar(&o.region, "region", envOr("BL_REGION", "us-was-1"), "Blaxel region")
 	fs.StringVar(&o.owner, "owner", "blaxel-main", "driver owner label (one per control plane)")
 	fs.StringVar(&o.mainBin, "bin", "bin/main", "dir with OpenShell main linux binaries: openshell-gateway, openshell-supervisor, openshell-sandbox")
