@@ -1,5 +1,5 @@
-github.com/blaxel-ai/sdk-go v0.27.2 h1:G4uNWLOT3qq0wV1BrXB1MGQOKJFA70K0lIgH153HIIU=
-github.com/blaxel-ai/sdk-go v0.27.2/go.mod h1:16T4C74vB/02MV8JjB3Uf9Ag4RbFbDKjdatrorX9E/U=
+github.com/blaxel-ai/sdk-go v0.29.1 h1:X1G39qjd9dpNtunF/XYo2RFqymPmK1noFfrLqnOOf9o=
+github.com/blaxel-ai/sdk-go v0.29.1/go.mod h1:16T4C74vB/02MV8JjB3Uf9Ag4RbFbDKjdatrorX9E/U=
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/golang/protobuf v1.5.4 h1:i7eJL8qZTpSEXOPTxNKhASYpMn+8e5Q6AdndVa1dWek=

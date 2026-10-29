@@ -3,7 +3,7 @@ module github.com/blaxel-ai/openshell-blaxel/driver
 go 1.25.0
 
 require (
-	github.com/blaxel-ai/sdk-go v0.27.2
+	github.com/blaxel-ai/sdk-go v0.29.1
 	github.com/coder/websocket v1.8.15
 	github.com/hashicorp/yamux v0.1.2
 	google.golang.org/grpc v1.84.0
