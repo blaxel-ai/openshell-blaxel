@@ -1,0 +1,10 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /experiments
+    schedule:
+      interval: weekly
+    groups:
+      blaxel:
+        patterns:
+          - "@blaxel/*"
