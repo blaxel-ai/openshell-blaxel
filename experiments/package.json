@@ -11,7 +11,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@blaxel/core": "^0.3.32"
+    "@blaxel/core": "^0.3.34"
   },
   "overrides": {
     "js-yaml": "4.3.2"
